@@ -3,57 +3,53 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import random
+import warnings
 from collections import deque
 from typing import List, Tuple, Optional
 
 from environment import (
     WarehouseLayout, nearest_neighbor_route, route_total_distance,
     nearest_workstation, best_workstation_route,
-    ROBOT_SPEED, SIM_TIME, NUM_WORKSTATIONS,
+)
+from constant import (
+    ROBOT_SPEED, SIM_TIME, NUM_WORKSTATIONS, DEFAULT_SEED,
+    GAMMA, LR, BATCH_SIZE, REPLAY_BUFFER_SIZE, TARGET_UPDATE_STEPS,
+    EPS_START, EPS_MIN, EPS_DECAY, GRAD_CLIP, N_STEP,
+    MAX_CANDIDATES, MAX_CANDIDATES_MARGIN,
+    PER_ALPHA, PER_BETA_START, PER_BETA_END, PER_PRIORITY_EPS,
+    STATE_MAX_TIME, QUEUE_NORM_FALLBACK, DELTA_NORM_CLIP,
+    TOTAL_EPISODES,
 )
 
-# ── 하이퍼파라미터 ─────────────────────────────────────────────────────────────
-GAMMA               = 0.99
-LR                  = 3e-4
-BATCH_SIZE          = 128
-REPLAY_BUFFER_SIZE  = 50_000
-TARGET_UPDATE_STEPS = 200
-EPS_START           = 1.0
-EPS_MIN             = 0.02
-EPS_DECAY           = 0.997
-GRAD_CLIP           = 10.0
-N_STEP              = 3
-MAX_CANDIDATES = 8
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Robot
-# ─────────────────────────────────────────────────────────────────────────────
 
 class Robot:
-    """로봇은 특정 워크스테이션에 영구 고정되지 않는다. workstation /
-    workstation_id 는 '이번 트립이 출발해 복귀할 워크스테이션'을 뜻하며,
-    새 트립을 시작할 때마다 redock() 을 통해 동적으로 바뀔 수 있다
-    (어느 워크스테이션으로 복귀할지는 그 트립의 목적지들을 기준으로
-    총 이동거리가 최소가 되도록 호출부에서 결정한다 — environment.
-    best_workstation_route / nearest_workstation 참고).
+    """피킹 로봇의 위치, 남은 경로, 적재 슬롯 상태를 관리한다.
 
-    state_vector() 는 위치/경로를 항상 '현재 도킹된 워크스테이션 기준
-    상대좌표'로 인코딩하며, 정규화 기준(coord_norm)은 레이아웃의 실제
-    치수에서 유도된다.
+    workstation / workstation_id는 현재 트립의 복귀 워크스테이션이며,
+    트립을 시작하거나 주문이 삽입될 때마다 총 이동거리가 최소가 되도록
+    다시 정해진다.
     """
 
     def __init__(self, robot_id: int, workstation: Tuple[float, float],
                  layout: WarehouseLayout, capacity: int,
                  workstation_id: int = 0):
+        """
+        입력:
+            robot_id: 로봇 id
+            workstation: 초기 워크스테이션 좌표
+            layout: WarehouseLayout
+            capacity: 적재 가능한 토트 수
+            workstation_id: 초기 워크스테이션 인덱스
+        """
         self.id             = robot_id
-        self.workstation     = workstation        # 이번 트립의 출발/복귀 워크스테이션 좌표
-        self.workstation_id  = workstation_id      # 이번 트립의 출발/복귀 워크스테이션 인덱스
+        self.workstation     = workstation
+        self.workstation_id  = workstation_id
         self.layout          = layout
         self.capacity        = capacity
         self.reset()
 
     def reset(self):
+        """로봇을 워크스테이션에 대기 중인 빈 상태로 되돌린다."""
         self.pos               = self.workstation
         self.route             = []
         self.idle_slots        = self.capacity
@@ -64,19 +60,35 @@ class Robot:
         self._travel_start     = None
 
     def start_travel(self, now: float):
+        """이동 시작 시각을 기록한다 (이미 이동 중이면 무시).
+
+        입력:
+            now: 현재 시각 (s)
+        """
         if self._travel_start is None:
             self._travel_start = now
 
     def end_travel(self, now: float):
+        """이동 종료 시 누적 이동시간을 갱신한다.
+
+        입력:
+            now: 현재 시각 (s)
+        """
         if self._travel_start is not None:
             self.total_travel_time += max(0.0, now - self._travel_start)
             self._travel_start = None
 
     def time_to_complete_current(self) -> float:
+        """현재 트립을 마치고 복귀할 때까지 남은 시간.
+
+        출력:
+            남은 이동시간 (s)
+        """
         return self.remaining_distance / ROBOT_SPEED
 
     @property
     def remaining_distance(self) -> float:
+        """현재 목적지 -> 남은 경로 -> 복귀 워크스테이션까지 남은 이동거리 (m)."""
         d = 0.0
         if self.current_dest:
             d += max(0.0, self._md(self.pos, self.current_dest) - self.progress)
@@ -91,6 +103,11 @@ class Robot:
         return d
 
     def arrive_at_node(self) -> bool:
+        """현재 목적지에 도착 처리하고 다음 목적지를 꺼낸다.
+
+        출력:
+            남은 경유지가 있어 다음 목적지가 설정되면 True, 없으면 False
+        """
         self.pos      = self.current_dest
         self.progress = 0.0
         if self.route:
@@ -100,10 +117,11 @@ class Robot:
         return False
 
     def redock(self, ws_id: int, layout: WarehouseLayout):
-        """새 목적 워크스테이션으로 재도킹한다 (idle 상태에서만 호출 가능).
+        """idle 로봇의 복귀 워크스테이션만 바꾼다. 현재 위치(pos)는 그대로 둔다.
 
-        로봇의 실제 물리적 위치(pos)는 그대로 두고, 이번에 새로 시작될
-        트립이 향할(그리고 복귀할) 워크스테이션만 갱신한다.
+        입력:
+            ws_id: 새 워크스테이션 인덱스
+            layout: WarehouseLayout
         """
         assert self.is_idle, "redock()은 idle 로봇에서만 호출할 수 있습니다."
         self.workstation_id = ws_id
@@ -111,10 +129,14 @@ class Robot:
 
     def assign_trip(self, destinations: List[Tuple[float, float]],
                     layout: WarehouseLayout):
-        """어느 워크스테이션으로 복귀해야 총 이동거리가 최소가
-        되는지를 best_workstation_route 로 매번 다시 계산해 확정한다.
+        """현재 위치에서 출발하는 새 트립을 배정하고 이동을 시작한다.
+
+        방문 순서는 NNH로 정하고, 복귀 워크스테이션은 총 이동거리가 최소인 곳으로 정한다.
+
+        입력:
+            destinations: 방문할 좌표 리스트
+            layout: WarehouseLayout
         """
-        # 트립은 로봇의 실제 현재 위치(pos)에서 출발한다.
         best_ws_id, route, _ = best_workstation_route(
             self.pos, destinations, layout.workstations, layout.aisle_distance)
         self.workstation_id = best_ws_id
@@ -126,9 +148,14 @@ class Robot:
 
     def insert_and_reorder(self, loc: Tuple[float, float],
                             layout: WarehouseLayout):
-        """삽입되는 주문은 기존 트립이 향하던 워크스테이션과 무관할 수 있으므로, 
-        삽입 후 전체 목적지 집합에 대해 최적 복귀
-        워크스테이션을 best_workstation_route 로 다시 계산해 갱신한다."""
+        """이동 중인 트립에 주문을 삽입하고 남은 경로와 복귀 워크스테이션을 다시 계산한다.
+
+        현재 목적지(current_dest)는 바꾸지 않고, 그 이후 경로만 재구성한다.
+
+        입력:
+            loc: 삽입할 주문 위치
+            layout: WarehouseLayout
+        """
         pending = list(self.route) + [loc]
         start   = self.current_dest if self.current_dest else self.pos
         best_ws_id, new_route, _ = best_workstation_route(
@@ -143,18 +170,21 @@ class Robot:
                                target_ws_coords: Optional[Tuple[float, float]] = None,
                                dynamic_ws: bool = False,
                                ) -> float:
-        """세 가지 모드를 지원한다.
+        """주문을 이 로봇에 추가했을 때 늘어나는 이동거리를 계산한다.
 
-        1) target_ws_coords 지정: (아직 redock() 되지 않은 idle 후보 로봇을
-           '이 워크스테이션으로 복귀한다면' 이라는 가정 하에 평가할 때 사용)
-           해당 좌표를 트립 종료(복귀) 지점으로 고정해 delta 를 계산한다.
-        2) dynamic_ws=True (target_ws_coords 미지정): mid-trip 후보 로봇의
-           복귀 워크스테이션을 '이 주문까지 포함했을 때 최적'인 지점으로
-           재탐색하여 delta 를 계산한다 — insert_and_reorder 가 실제로
-           수행할 재계산과 동일한 기준으로 평가해야 에이전트의 스코어링이
-           실제 삽입 결과와 일치한다(problem description #3).
-        3) 둘 다 아니면: 현재 self.workstation(마지막으로 확정된 복귀지)을
-           그대로 사용한다.
+        복귀 지점은 다음 우선순위로 정한다.
+          1) target_ws_coords가 주어지면 그 좌표로 고정 (idle 후보 평가용)
+          2) dynamic_ws=True이면 주문 포함 후 최적 워크스테이션으로 재탐색
+             (insert_and_reorder와 같은 기준, mid-trip 후보 평가용)
+          3) 그 외에는 현재 self.workstation 사용
+
+        입력:
+            loc: 추가할 주문 위치
+            layout: WarehouseLayout
+            target_ws_coords: 고정할 복귀 좌표
+            dynamic_ws: 복귀 워크스테이션 재탐색 여부
+        출력:
+            삽입 후 남은 경로 거리 − 삽입 전 남은 경로 거리 (m)
         """
         pending = list(self.route) + [loc]
         start   = self.current_dest if self.current_dest else self.pos
@@ -177,9 +207,16 @@ class Robot:
 
         return after - before
 
-    def state_vector(self, max_cap: int, max_time: float = 300.0) -> np.ndarray:
-        """항상 현재 도킹된 워크스테이션 기준 상대좌표로 인코딩한다.
-        정규화 기준(coord_norm)은 레이아웃 실제 치수에서 유도된다."""
+    def state_vector(self, max_cap: int, max_time: float = STATE_MAX_TIME) -> np.ndarray:
+        """로봇 상태를 현재 복귀 워크스테이션 기준 상대좌표로 인코딩한다.
+
+        입력:
+            max_cap: 로봇 용량 (슬롯/경로 정규화 및 패딩 길이)
+            max_time: 잔여 이동시간 정규화 기준 (s)
+        출력:
+            길이 5 + max_cap*2 벡터
+            [상대 x, 상대 y, 빈 슬롯 비율, idle 여부, 잔여시간, 경유지 상대좌표...]
+        """
         wx, wy     = self.workstation
         norm       = self.layout.coord_norm
         rem_t_norm = min(self.time_to_complete_current() / max_time, 1.0)
@@ -200,47 +237,54 @@ class Robot:
 
     def _remaining_route_dist(self, layout: WarehouseLayout,
                                end: Optional[Tuple[float, float]] = None) -> float:
+        """현재 목적지(없으면 현재 위치)부터 남은 경로를 거쳐 end까지의 거리.
+
+        입력:
+            layout: WarehouseLayout
+            end: 도착 좌표 (None이면 self.workstation)
+        출력:
+            이동거리 (m)
+        """
         end   = end if end is not None else self.workstation
         start = self.current_dest if self.current_dest else self.pos
         return route_total_distance(start, self.route, end,
                                     layout.aisle_distance)
 
     def _start_move(self):
+        """경로의 첫 지점을 현재 목적지로 설정한다."""
         if self.route:
             self.current_dest = self.route.pop(0)
 
     def _md(self, p1, p2):
+        """통로 그래프 거리 (layout.aisle_distance 단축)."""
         return self.layout.aisle_distance(p1, p2)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 후보(candidate) 특징 차원
-# ─────────────────────────────────────────────────────────────────────────────
-
 def candidate_feature_dim(robot_capacity: int) -> int:
-    """
-    (주문, 후보 로봇 1명) 쌍 하나를 표현하는 특징벡터의 차원.
-      order_rel   : 2   (주문 위치, 후보 로봇의 현재 워크스테이션 기준 상대좌표)
-      delta_ins   : 1   (이 로봇에 배정 시 예상 삽입 detour, 정규화)
-      robot_state : 5 + robot_capacity*2   (Robot.state_vector, 이미 상대좌표)
-      context     : 2   (전체 대기 큐 길이 정규화, 경과시간 정규화)
+    """(주문, 후보 로봇) 쌍 특징벡터의 차원.
+
+    구성: 주문 상대좌표 2 + 삽입 detour 1 + 로봇 상태 (5 + capacity*2)
+          + 컨텍스트 2 (큐 길이, 경과시간)
+
+    입력:
+        robot_capacity: 로봇 용량
+    출력:
+        특징 차원 수
     """
     return 2 + 1 + (5 + robot_capacity * 2) + 2
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 후보 스코어링 네트워크
-# ─────────────────────────────────────────────────────────────────────────────
-
 class RobotScoreNet(nn.Module):
-    """(주문, 후보 로봇) 쌍 하나에 대해 스칼라 Q값을 출력한다.
+    """(주문, 후보 로봇) 쌍 하나의 Q값을 출력하는 MLP.
 
-    후보 집합의 크기(=이 순간 가용한 로봇 수)와 무관하게 동일한 파라미터로
-    각 후보를 독립 평가한다(배치 차원으로 병렬 처리). 전체 로봇 대수 M 이
-    늘어도 이 네트워크의 파라미터 수/출력 차원은 그대로다.
+    후보마다 같은 파라미터로 독립 평가하므로 로봇 수와 무관하게 크기가 고정된다.
     """
 
     def __init__(self, feat_dim: int):
+        """
+        입력:
+            feat_dim: 입력 특징 차원
+        """
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(feat_dim, 128), nn.LayerNorm(128), nn.ReLU(),
@@ -250,21 +294,28 @@ class RobotScoreNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x).squeeze(-1)   # (batch,)
+        """
+        입력:
+            x: (..., feat_dim) 특징 텐서
+        출력:
+            (...) Q값 텐서
+        """
+        return self.net(x).squeeze(-1)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Prioritized Experience Replay
-# ─────────────────────────────────────────────────────────────────────────────
 
 class PrioritizedReplayBuffer:
-    """α=0.6, β=0.4→1.0 annealing.
+    """TD 오차 기반 우선순위 경험 재생 버퍼 (PER).
 
     저장 항목: (feat, reward, next_feats[max_candidates, feat_dim],
                next_mask[max_candidates], done)
     """
 
-    def __init__(self, capacity: int = REPLAY_BUFFER_SIZE, alpha: float = 0.6):
+    def __init__(self, capacity: int = REPLAY_BUFFER_SIZE, alpha: float = PER_ALPHA):
+        """
+        입력:
+            capacity: 최대 저장 개수 (초과 시 오래된 항목부터 덮어씀)
+            alpha: 우선순위 지수
+        """
         self.capacity      = capacity
         self.alpha         = alpha
         self.buf           = [None] * capacity
@@ -274,12 +325,29 @@ class PrioritizedReplayBuffer:
         self._max_priority = 1.0
 
     def push(self, feat, reward, next_feats, next_mask, done):
+        """전이 1건을 현재까지의 최대 우선순위로 저장한다.
+
+        입력:
+            feat: 선택한 후보의 특징
+            reward: (n-step) 보상
+            next_feats: 다음 결정 시점 후보 특징 (패딩됨)
+            next_mask: next_feats 유효 마스크
+            done: 종료 여부
+        """
         self.buf[self.pos]        = (feat, reward, next_feats, next_mask, done)
         self.priorities[self.pos] = self._max_priority
         self.pos  = (self.pos + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
-    def sample(self, batch_size: int, beta: float = 0.4):
+    def sample(self, batch_size: int, beta: float = PER_BETA_START):
+        """우선순위 비례 확률로 배치를 샘플링한다.
+
+        입력:
+            batch_size: 배치 크기
+            beta: 중요도 샘플링 보정 지수
+        출력:
+            (feat, reward, next_feats, next_mask, done, idxs, weights) numpy 배열 튜플
+        """
         prios   = self.priorities[:self.size] ** self.alpha
         probs   = prios / prios.sum()
         idxs    = np.random.choice(self.size, batch_size, replace=False, p=probs)
@@ -298,7 +366,13 @@ class PrioritizedReplayBuffer:
         )
 
     def update_priorities(self, idxs, td_errors):
-        prios = np.abs(td_errors) + 1e-6
+        """샘플된 항목의 우선순위를 |TD 오차|로 갱신한다.
+
+        입력:
+            idxs: 버퍼 인덱스 배열
+            td_errors: 대응하는 TD 오차 배열
+        """
+        prios = np.abs(td_errors) + PER_PRIORITY_EPS
         self.priorities[idxs] = prios
         self._max_priority = max(self._max_priority, prios.max())
 
@@ -306,25 +380,40 @@ class PrioritizedReplayBuffer:
         return self.size
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# N-step return buffer
-# ─────────────────────────────────────────────────────────────────────────────
-
 class NStepBuffer:
-    """항목 형식: (feat, reward, next_feats, next_mask, done)."""
+    """n-step 누적 보상을 만들기 위한 임시 버퍼.
+
+    항목 형식: (feat, reward, next_feats, next_mask, done)
+    """
 
     def __init__(self, n: int = N_STEP, gamma: float = GAMMA):
+        """
+        입력:
+            n: 누적할 스텝 수
+            gamma: 할인율
+        """
         self.n     = n
         self.gamma = gamma
         self.buf   = deque()
 
     def push(self, transition):
+        """1-step 전이를 추가한다.
+
+        입력:
+            transition: (feat, reward, next_feats, next_mask, done)
+        """
         self.buf.append(transition)
 
     def ready(self) -> bool:
+        """n개 이상 쌓여 n-step 전이를 만들 수 있으면 True."""
         return len(self.buf) >= self.n
 
     def get(self):
+        """가장 오래된 전이 기준 n-step 전이를 만들고 그 전이를 버퍼에서 뺀다.
+
+        출력:
+            (feat0, G, next_feats_n, next_mask_n, done_n)
+        """
         feat0 = self.buf[0][0]
         _, _, nf, nm, d = self.buf[-1]
         G = 0.0
@@ -336,6 +425,11 @@ class NStepBuffer:
         return (feat0, G, nf, nm, d)
 
     def flush(self):
+        """에피소드 종료 시 남은 전이를 모두 n-step 전이로 변환해 비운다.
+
+        출력:
+            (feat0, G, next_feats, next_mask, done) 리스트
+        """
         results = []
         while self.buf:
             feat0     = self.buf[0][0]
@@ -346,25 +440,32 @@ class NStepBuffer:
         return results
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DQNAgent (Factored / Candidate-Scoring)
-# ─────────────────────────────────────────────────────────────────────────────
-
 class DQNAgent:
-    """행동 공간을 '전체 로봇 수 M' 대신 '그 순간의 실제 가용 로봇 집합'으로
-    정의하는 factored D3QN 에이전트."""
+    """후보 스코어링 방식의 Double DQN 에이전트.
 
-    def __init__(self, robot_capacity: int, seed: int = 42,
+    행동은 그 순간 배정 가능한 후보 로봇 리스트 내 인덱스이며,
+    각 후보를 RobotScoreNet으로 스코어링해 최댓값을 고른다.
+    """
+
+    def __init__(self, robot_capacity: int, seed: int = DEFAULT_SEED,
                 sim_time: float = SIM_TIME, num_robots: Optional[int] = None,
                 num_workstations: int = NUM_WORKSTATIONS):
+        """
+        입력:
+            robot_capacity: 로봇 용량
+            seed: ε-greedy 탐색 난수 시드
+            sim_time: 경과시간 정규화 기준 (s)
+            num_robots: 로봇 수 (최대 후보 수 결정, 로깅용)
+            num_workstations: 워크스테이션 수 (로깅용)
+        """
         self.robot_capacity   = robot_capacity
         self.sim_time         = sim_time
-        self.num_robots       = num_robots          # 참고/로깅용
-        self.num_workstations = num_workstations    # 참고/로깅용
+        self.num_robots       = num_robots
+        self.num_workstations = num_workstations
         self.feat_dim         = candidate_feature_dim(robot_capacity)
 
         if num_robots is not None:
-            self.max_candidates = max(MAX_CANDIDATES, num_robots + 3)
+            self.max_candidates = max(MAX_CANDIDATES, num_robots + MAX_CANDIDATES_MARGIN)
         else:
             self.max_candidates = MAX_CANDIDATES
 
@@ -379,32 +480,32 @@ class DQNAgent:
         self.nstep_buf = NStepBuffer(n=N_STEP, gamma=GAMMA)
 
         self.epsilon  = EPS_START
-        self.beta     = 0.4
-        self.beta_end = 1.0
+        self.beta     = PER_BETA_START
+        self.beta_end = PER_BETA_END
         self.steps    = 0
         self.rng      = random.Random(seed)
 
-    # ── 후보 특징 생성 ────────────────────────────────────────────────────────
     def build_candidates(self, order_loc: Tuple[float, float],
                          robots: List[Robot], n_wait: int,
                          layout: WarehouseLayout, now: float = 0.0,
                          ws_capacity: Optional[float] = None) -> np.ndarray:
-        """eligible 로봇 리스트에 대해 (len(robots), feat_dim) 특징 행렬을 만든다.
+        """후보 로봇마다 (주문, 로봇) 특징벡터를 만든다.
 
-        주문이 특정 워크스테이션에 고정되지 않으므로, idle 후보 로봇의 삽입
-        detour는 '주문 위치에서 가장 가까운 워크스테이션으로 복귀한다면'을
-        가정해 계산한다(nearest_workstation). mid-trip 후보는 self.workstation
-        (과거 확정된 복귀지)을 고정 가정하지 않고, 이 주문까지 포함했을 때의
-        최적 복귀 워크스테이션을 best_workstation_route 로 다시 탐색
-        (dynamic_ws=True)해 detour 를 계산한다 — 실제 insert_and_reorder() 가
-        수행할 재계산과 동일한 기준이어야 에이전트의 스코어와 실제 삽입
-        결과가 일치한다.
+        삽입 detour는 idle 후보면 주문 위치에서 가장 가까운 워크스테이션으로
+        복귀한다고 가정하고, mid-trip 후보면 주문 포함 후 최적 워크스테이션을
+        재탐색해 계산한다 (실제 insert_and_reorder 결과와 같은 기준).
 
-        ws_capacity: 큐 압박 정규화 기준 용량. 로봇 풀이 워크스테이션에
-                     고정 분할되지 않으므로 보통 전체 로봇 풀 기준
-                     (num_robots * robot_capacity)을 넘긴다.
+        입력:
+            order_loc: 주문 위치
+            robots: 후보 로봇 리스트
+            n_wait: 현재 대기 큐 길이
+            layout: WarehouseLayout
+            now: 현재 시각 (s)
+            ws_capacity: 큐 길이 정규화 기준 (보통 num_robots * robot_capacity)
+        출력:
+            (len(robots), feat_dim) float32 배열
         """
-        queue_denom  = ws_capacity if (ws_capacity is not None and ws_capacity > 0) else 20.0
+        queue_denom  = ws_capacity if (ws_capacity is not None and ws_capacity > 0) else QUEUE_NORM_FALLBACK
         queue_norm   = min(n_wait / queue_denom, 1.0)
         elapsed_norm = min(now / self.sim_time, 1.0)
 
@@ -416,21 +517,24 @@ class DQNAgent:
             wx, wy    = r.workstation
             order_rel = [(order_loc[0] - wx) / layout.coord_norm,
                         (order_loc[1] - wy) / layout.coord_norm]
-            # idle 후보: '주문 위치에서 가장 가까운 워크스테이션으로 복귀한다면'을
-            # 가정(target_ws_coords)해 평가한다.
-            # busy(mid-trip) 후보: 더 이상 self.workstation(과거 확정된 복귀지)을
-            # 고정 가정하지 않고, 이 주문까지 포함했을 때의 최적 복귀 워크스테이션을
-            # 다시 탐색(dynamic_ws=True)해 평가한다 — 실제 insert_and_reorder()가
-            # 수행할 재계산과 동일한 기준이어야 스코어와 실제 결과가 일치한다.
             end        = target_coords if r.is_idle else None
             delta_ins  = r.delta_distance_insert(
                 order_loc, layout, target_ws_coords=end, dynamic_ws=(not r.is_idle))
-            delta_norm = min(delta_ins / layout.dist_norm, 3.0)
+            delta_norm = min(delta_ins / layout.dist_norm, DELTA_NORM_CLIP)
             robot_feat = r.state_vector(self.robot_capacity).tolist()
             feats[i]   = order_rel + [delta_norm] + robot_feat + [queue_norm, elapsed_norm]
         return feats
 
     def _pad(self, feats: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """후보 특징을 max_candidates 길이로 0-패딩한다. 초과분은 경고 후 버린다.
+
+        입력:
+            feats: (n, feat_dim) 후보 특징
+        출력:
+            (padded, mask)
+            padded: (max_candidates, feat_dim)
+            mask: (max_candidates,) 유효 후보 여부
+        """
         n      = feats.shape[0]
         padded = np.zeros((self.max_candidates, self.feat_dim), dtype=np.float32)
         mask   = np.zeros(self.max_candidates, dtype=np.bool_)
@@ -438,16 +542,20 @@ class DQNAgent:
         padded[:k] = feats[:k]
         mask[:k]   = True
         if n > self.max_candidates:
-            import warnings
             warnings.warn(
                 f"[DQNAgent] candidate count {n} exceeds max_candidates="
                 f"{self.max_candidates}; extra candidates are being dropped. "
                 f"Increase num_robots/num_workstations hint at agent creation.")
         return padded, mask
 
-    # ── 행동 선택 ─────────────────────────────────────────────────────────────
     def select_index(self, cand_feats: np.ndarray) -> int:
-        """cand_feats: (n_eligible, feat_dim). eligible 리스트 내 인덱스를 반환."""
+        """ε-greedy로 후보 하나를 고른다.
+
+        입력:
+            cand_feats: (n_eligible, feat_dim) 후보 특징
+        출력:
+            선택한 후보 인덱스, 후보가 없으면 -1
+        """
         n = cand_feats.shape[0]
         if n == 0:
             return -1
@@ -457,9 +565,16 @@ class DQNAgent:
             q = self.policy_net(torch.tensor(cand_feats)).numpy()
         return int(np.argmax(q))
 
-    # ── 학습 ──────────────────────────────────────────────────────────────────
     def push(self, feat: np.ndarray, reward: float,
             next_feats: Optional[np.ndarray], done: bool):
+        """전이를 n-step 버퍼를 거쳐 리플레이 버퍼에 저장한다.
+
+        입력:
+            feat: 선택한 후보의 특징
+            reward: 즉시 보상
+            next_feats: 다음 결정 시점 후보 특징 (없으면 None)
+            done: 에피소드 종료 여부
+        """
         if next_feats is None or len(next_feats) == 0:
             nf_pad = np.zeros((self.max_candidates, self.feat_dim), dtype=np.float32)
             nm     = np.zeros(self.max_candidates, dtype=np.bool_)
@@ -473,6 +588,13 @@ class DQNAgent:
                 self.buffer.push(*t)
 
     def train_step(self) -> Optional[float]:
+        """리플레이 버퍼에서 배치 하나를 뽑아 Double DQN 업데이트를 1회 수행한다.
+
+        다음 상태의 행동은 policy_net으로 고르고 값은 target_net으로 평가한다.
+
+        출력:
+            가중 MSE 손실값, 버퍼가 BATCH_SIZE보다 작으면 None
+        """
         if len(self.buffer) < BATCH_SIZE:
             return None
 
@@ -517,14 +639,22 @@ class DQNAgent:
             self.target_net.load_state_dict(self.policy_net.state_dict())
         return loss.item()
 
-    def decay_epsilon(self, total_episodes: int = 1000):
+    def decay_epsilon(self, total_episodes: int = TOTAL_EPISODES):
+        """에피소드 종료마다 ε을 감소시키고 PER β를 선형 증가시킨다.
+
+        입력:
+            total_episodes: 전체 학습 에피소드 수 (β 증가 폭 결정)
+        """
         self.epsilon = max(EPS_MIN, self.epsilon * EPS_DECAY)
         self.beta    = min(self.beta_end,
-                           self.beta + (self.beta_end - 0.4) / total_episodes)
-        
-    # ── 체크포인트 ────────────────────────────────────────────────────────────
+                           self.beta + (self.beta_end - PER_BETA_START) / total_episodes)
+
     def save(self, path: str):
-        """학습된 정책을 파일로 저장한다(경로 로그 재현/분석 시 재사용하기 위함)."""
+        """네트워크 가중치와 학습 상태를 체크포인트로 저장한다.
+
+        입력:
+            path: 저장 경로
+        """
         torch.save({
             "policy_state": self.policy_net.state_dict(),
             "target_state": self.target_net.state_dict(),
@@ -535,8 +665,13 @@ class DQNAgent:
             "num_robots":      self.num_robots,
             "num_workstations": self.num_workstations,
         }, path)
- 
+
     def load(self, path: str):
+        """save()로 저장한 체크포인트를 불러온다.
+
+        입력:
+            path: 체크포인트 경로
+        """
         ckpt = torch.load(path, map_location=self.device)
         self.policy_net.load_state_dict(ckpt["policy_state"])
         self.target_net.load_state_dict(ckpt["target_state"])

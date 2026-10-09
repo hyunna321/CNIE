@@ -2,22 +2,33 @@ import json
 import os
 from typing import Any, Dict
 
+from constant import (
+    DEFAULT_SEED, SIM_TIME, NUM_WORKSTATIONS, LAMBDA_GRID, NUM_ROBOTS,
+    ROBOT_CAPACITY, PARTIAL_K, TOTAL_EPISODES, N_EVAL,
+)
+
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "seed":              42,
-    "sim_time":          36000,
-    "num_workstations":  3,
+    "seed":              DEFAULT_SEED,
+    "sim_time":          SIM_TIME,
+    "num_workstations":  NUM_WORKSTATIONS,
     "lambda_default":    800 / 3600,
-    # λ 그리드: 700 / 800 / 900 / 1000 (orders/hr)
-    "lambda_grid":       [700 / 3600, 800 / 3600, 900 / 3600, 1000 / 3600],
-    "robot_counts":      [14],
-    "robot_capacity":    5,
-    "partial_k":         3,
-    "total_episodes":    1000,
-    "n_eval":            20,
+    "lambda_grid":       list(LAMBDA_GRID),
+    "robot_counts":      [NUM_ROBOTS],
+    "robot_capacity":    ROBOT_CAPACITY,
+    "partial_k":         PARTIAL_K,
+    "total_episodes":    TOTAL_EPISODES,
+    "n_eval":            N_EVAL,
 }
 
 
 def load_config(path: str = "config.json") -> Dict[str, Any]:
+    """JSON 설정 파일을 읽어 DEFAULT_CONFIG 위에 덮어쓴다.
+
+    입력:
+        path: 설정 파일 경로
+    출력:
+        설정 딕셔너리 (파일이 없으면 DEFAULT_CONFIG 복사본)
+    """
     if os.path.exists(path):
         with open(path) as f:
             return {**DEFAULT_CONFIG, **json.load(f)}

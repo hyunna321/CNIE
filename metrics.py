@@ -1,64 +1,66 @@
-"""
-metrics.py  —  실험 결과 컨테이너 및 비교 출력.
-
-변경 사항
-──────────
-- EpisodeResult에 num_robots, saving_per_insertion 필드 추가
-  (이전 실행에서 num_robots=0으로 유실되던 문제 수정)
-- saving_per_insertion: extra_travel 기반 삽입 효율 지표
-- robot_utilization, partial_trip_rate, mid_trip_count 필드 제거
-- total_distance(총 이동거리), avg_totes_per_trip(trip당 평균 tote 수) 필드 추가
-- n_completed는 throughput(완료 주문 수 기반 처리량)으로 표시
-"""
+"""에피소드 결과 컨테이너, CSV 저장, 정책 간 비교표 출력."""
 from __future__ import annotations
 
 import csv
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
+
+from constant import SIM_TIME
 
 
 @dataclass
 class EpisodeResult:
+    """에피소드 1회의 결과 지표."""
     label:                  str
     episode:                int
     lam:                    float
-    num_robots:             int        # M 값 (이전에는 항상 0으로 기록되던 버그 수정)
+    num_robots:             int
     n_completed:            int
     n_arrived:              int
     avg_flow_time:          float
     avg_wait_time:          float
     dist_per_order:         float
-    total_distance:         float = 0.0   # 총 이동 거리 (m)
-    avg_totes_per_trip:     float = 0.0   # trip당 평균 tote(주문) 수
+    total_distance:         float = 0.0   # m, 총 이동거리
+    avg_totes_per_trip:     float = 0.0   # 트립당 평균 토트(주문) 수
     mid_trip_rate:          float = 0.0
     extra_travel_m:         float = 0.0
-    saving_per_insertion:   float = 0.0  # 삽입 1건당 절감 이동거리 (m)
+    saving_per_insertion:   float = 0.0   # m, 삽입 1건당 절감 이동거리
     reward:                 float = 0.0
     epsilon:                float = 0.0
 
     @property
     def completion_rate(self) -> float:
+        """완료 주문 수 / 도착 주문 수."""
         return self.n_completed / max(1, self.n_arrived)
 
     @property
     def throughput(self) -> float:
-        return self.n_completed / (10 * 3600)
-
-
-# 단독 왕복 거리 추정 기준 (창고 평균 픽업 거리 × 2)
-_SOLO_RT_M = 80.0
+        """초당 완료 주문 수 (orders/s)."""
+        return self.n_completed / SIM_TIME
 
 
 class MetricsStore:
+    """EpisodeResult 목록을 모아 필터링하고 CSV로 저장한다."""
+
     def __init__(self):
         self.records: List[EpisodeResult] = []
 
     def add(self, r: EpisodeResult):
+        """결과 1건을 추가한다.
+
+        입력:
+            r: 추가할 EpisodeResult
+        """
         self.records.append(r)
 
     def save_csv(self, path: str):
+        """전체 결과를 CSV로 저장한다. completion_rate, throughput 열을 함께 기록한다.
+
+        입력:
+            path: 저장 경로 (상위 디렉터리는 자동 생성)
+        """
         if not self.records:
             return
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -77,6 +79,16 @@ class MetricsStore:
                lam: Optional[float] = None,
                num_robots: Optional[int] = None,
                last_n: Optional[int] = None) -> List[EpisodeResult]:
+        """조건에 맞는 결과만 골라낸다. None인 조건은 무시한다.
+
+        입력:
+            label: 정책 라벨
+            lam: 주문 도착률
+            num_robots: 로봇 수
+            last_n: 조건을 적용한 뒤 마지막 n개만 사용
+        출력:
+            조건에 맞는 EpisodeResult 리스트
+        """
         rs = self.records
         if label is not None:
             rs = [r for r in rs if r.label == label]
@@ -89,8 +101,51 @@ class MetricsStore:
         return rs
 
 
-# ── 테이블 출력 ──────────────────────────────────────────────────────────────
+@dataclass
+class TrainingPoint:
+    """학습 곡선의 에피소드 1개 지점."""
+    label:         str
+    episode:       int
+    reward:        float
+    loss:          float
+    epsilon:       float
+    n_completed:   int
+    avg_flow_time: float
 
+
+class TrainingCurveStore:
+    """학습 곡선 지점(TrainingPoint)을 모아 CSV로 저장한다."""
+
+    def __init__(self):
+        self.records: List[TrainingPoint] = []
+
+    def add(self, p: TrainingPoint):
+        """지점 1개를 추가한다.
+
+        입력:
+            p: 추가할 TrainingPoint
+        """
+        self.records.append(p)
+
+    def save_csv(self, path: str):
+        """전체 지점을 CSV로 저장한다.
+
+        입력:
+            path: 저장 경로 (상위 디렉터리는 자동 생성)
+        """
+        if not self.records:
+            return
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        fields = ["label", "episode", "reward", "loss", "epsilon",
+                  "n_completed", "avg_flow_time"]
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fields)
+            w.writeheader()
+            for r in self.records:
+                w.writerow({k: getattr(r, k) for k in fields})
+
+
+# 지표 이름 -> (값이 클수록 좋은지, 표시 이름)
 METRIC_DISPLAY = {
     "throughput":           (True,  "Throughput (orders/s)"),
     "completion_rate":      (True,  "Completion Rate"),
@@ -105,6 +160,14 @@ METRIC_DISPLAY = {
 
 
 def _get_field(r: EpisodeResult, fname: str) -> float:
+    """EpisodeResult에서 지표 값을 읽는다 (property 지표 포함).
+
+    입력:
+        r: 대상 결과
+        fname: 지표 이름
+    출력:
+        지표 값
+    """
     if fname == "completion_rate":
         return r.completion_rate
     if fname == "throughput":
@@ -116,6 +179,16 @@ def compare_labels(store: MetricsStore, labels: List[str],
                    lam: Optional[float] = None,
                    num_robots: Optional[int] = None,
                    last_n: int = 10) -> Dict[str, Dict[str, float]]:
+    """정책별로 각 지표의 평균을 계산한다.
+
+    입력:
+        store: 결과 저장소
+        labels: 비교할 정책 라벨 리스트
+        lam, num_robots: 필터 조건
+        last_n: 정책별로 마지막 n개 결과만 평균
+    출력:
+        {지표 이름: {라벨: 평균값}}, 결과가 없으면 nan
+    """
     result: Dict[str, Dict[str, float]] = {}
     for fname in METRIC_DISPLAY:
         result[fname] = {}
@@ -134,6 +207,15 @@ def print_comparison(store: MetricsStore, labels: List[str],
                      lam: Optional[float] = None,
                      num_robots: Optional[int] = None,
                      last_n: int = 10, title: str = "Comparison"):
+    """정책별 지표 평균을 표로 출력한다. 지표마다 가장 좋은 값에 *를 붙인다.
+
+    입력:
+        store: 결과 저장소
+        labels: 비교할 정책 라벨 리스트
+        lam, num_robots: 필터 조건
+        last_n: 정책별로 마지막 n개 결과만 평균
+        title: 표 제목
+    """
     data  = compare_labels(store, labels, lam=lam,
                            num_robots=num_robots, last_n=last_n)
     lam_s = f"  λ={int(lam*3600)}/hr" if lam is not None else ""
@@ -167,6 +249,13 @@ def print_comparison(store: MetricsStore, labels: List[str],
 
 
 def _fmt(v: float) -> str:
+    """값 크기에 따라 자릿수를 달리해 문자열로 바꾼다.
+
+    입력:
+        v: 숫자
+    출력:
+        포맷된 문자열
+    """
     if math.isnan(v):
         return "nan"
     if abs(v) >= 1e4:
