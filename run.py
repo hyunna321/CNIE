@@ -8,22 +8,52 @@
     python run.py all              # 위 세 실험 전부
 
     --episodes, --n-eval 로 학습 에피소드 수와 평가 시드 수를 바꿀 수 있다.
+    --grid 를 주면 셀 그리드 이동 모드(grid.GridWarehouseLayout)로 실행하고, 결과는
+    logs_grid_{traffic}_{motion}/, logs_experiment_grid_{traffic}_{motion}/ 에 따로 저장한다.
+      --traffic free|lanes     모든 방향 이동 / 일방통행 통로 + 차선 교차통로 (기본 free)
+      --motion reserve|reactive 배정 시 시공간 경로 예약 / 막히면 대기·우회 (기본 reserve)
+      --no-collisions           reactive에서 로봇 간 점유를 무시 (회귀 검증용)
 """
 import argparse
 import os
 from typing import Dict, Iterable, List, Optional
 
 from environment import WarehouseLayout
+from grid import GridWarehouseLayout
 from agents import DQNAgent
 from metrics import MetricsStore, TrainingCurveStore, print_comparison
 from training import train, evaluate_all
 from constant import (
+    GRID_TRAFFIC, GRID_MOTION,
     SIM_TIME, LAMBDA_GRID, DEFAULT_SEED, NUM_ROBOTS, ROBOT_CAPACITY,
     TOTAL_EPISODES, N_EVAL, EVAL_SEED_BASE, OUT_DIR, POLICY_LABELS,
     EXPERIMENT_LAMBDA, EXPERIMENT_OUT_DIR,
     EXPERIMENT_ROBOT_SWEEP, EXPERIMENT_ROBOT_SWEEP_K,
     EXPERIMENT_WS_SWEEP, EXPERIMENT_WS_SWEEP_M,
 )
+
+
+# 레이아웃 선택 (main()에서 --grid, --no-collisions로 설정)
+GRID_MODE       = False
+GRID_COLLISIONS = True
+GRID_OPTS       = {"traffic": GRID_TRAFFIC, "motion": GRID_MOTION}
+
+
+def make_layout(num_robots: int = NUM_ROBOTS,
+                num_workstations: Optional[int] = None) -> WarehouseLayout:
+    """현재 모드에 맞는 레이아웃을 만든다.
+
+    입력:
+        num_robots: 로봇 수 M (그리드 모드의 대기열/주차 셀 크기 결정에 사용)
+        num_workstations: 워크스테이션 수 K (None이면 기본값)
+    출력:
+        WarehouseLayout 또는 GridWarehouseLayout
+    """
+    kw = {} if num_workstations is None else {"num_workstations": num_workstations}
+    if GRID_MODE:
+        return GridWarehouseLayout(seed=DEFAULT_SEED, num_robots=num_robots,
+                                   collisions=GRID_COLLISIONS, **GRID_OPTS, **kw)
+    return WarehouseLayout(seed=DEFAULT_SEED, **kw)
 
 
 # λ 그리드 실험
@@ -115,7 +145,7 @@ def run_lambda_grid(total_episodes: int = TOTAL_EPISODES, n_eval: int = N_EVAL,
     """
     os.makedirs(out_dir, exist_ok=True)
 
-    layout = WarehouseLayout(seed=DEFAULT_SEED)
+    layout = make_layout(NUM_ROBOTS)
 
     print("=" * 60)
     print(f"λ grid experiment  (M={NUM_ROBOTS} 고정, K={layout.num_workstations})")
@@ -162,7 +192,7 @@ def run_setting(experiment_name: str, num_robots: int, num_workstations: int,
     setting_dir = os.path.join(out_dir, experiment_name, setting_name)
     os.makedirs(setting_dir, exist_ok=True)
 
-    layout = WarehouseLayout(seed=DEFAULT_SEED, num_workstations=num_workstations)
+    layout = make_layout(num_robots, num_workstations)
     agent = DQNAgent(
         num_robots=num_robots,
         robot_capacity=ROBOT_CAPACITY,
@@ -266,16 +296,34 @@ def main():
                         help="학습 에피소드 수")
     parser.add_argument("--n-eval", type=int, default=N_EVAL,
                         help="평가 시드 수")
+    parser.add_argument("--grid", action="store_true",
+                        help="셀 그리드 이동 모드 (충돌/혼잡 반영)")
+    parser.add_argument("--traffic", choices=["free", "lanes"], default=GRID_TRAFFIC,
+                        help="그리드 이동 규칙: 모든 방향(free) / 일방통행 통로 + 차선 교차통로(lanes)")
+    parser.add_argument("--motion", choices=["reserve", "reactive"], default=GRID_MOTION,
+                        help="그리드 충돌 처리: 시공간 경로 예약(reserve) / 막히면 대기·우회(reactive)")
+    parser.add_argument("--no-collisions", action="store_true",
+                        help="reactive에서 로봇 간 셀 점유를 무시 (회귀 검증용)")
     args = parser.parse_args()
 
+    global GRID_MODE, GRID_COLLISIONS
+    GRID_MODE       = args.grid
+    GRID_COLLISIONS = not args.no_collisions
+    GRID_OPTS.update(traffic=args.traffic, motion=args.motion)
+    suffix = ""
+    if GRID_MODE:
+        suffix = f"_grid_{args.traffic}_{args.motion}" + ("" if GRID_COLLISIONS else "_nocoll")
+    out_dir = OUT_DIR + suffix
+    exp_dir = EXPERIMENT_OUT_DIR + suffix
+
     if args.experiment in ("lambda-grid", "all"):
-        run_lambda_grid(args.episodes, args.n_eval)
+        run_lambda_grid(args.episodes, args.n_eval, out_dir=out_dir)
     if args.experiment in ("robot-sweep", "all"):
-        run_robot_sweep(args.episodes, args.n_eval)
+        run_robot_sweep(args.episodes, args.n_eval, out_dir=exp_dir)
     if args.experiment in ("ws-sweep", "all"):
-        run_ws_sweep(args.episodes, args.n_eval)
+        run_ws_sweep(args.episodes, args.n_eval, out_dir=exp_dir)
     if args.experiment in ("robot-sweep", "ws-sweep", "all"):
-        print(f"\nDone. Results saved under: {EXPERIMENT_OUT_DIR}")
+        print(f"\nDone. Results saved under: {exp_dir}")
 
 
 if __name__ == "__main__":

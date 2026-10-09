@@ -1,4 +1,5 @@
 import random
+from collections import deque
 from typing import List, Tuple, Dict, Callable, Optional
 
 import numpy as np
@@ -6,7 +7,7 @@ import numpy as np
 from constant import (
     BN, AN, SN, Wa, Wc, Wt, Dt, STORAGE_LOCS, NUM_SKUS,
     NUM_ROBOTS, ROBOT_CAPACITY, NUM_WORKSTATIONS, DEFAULT_SEED,
-    ROBOT_SPEED, STATE_MAX_TIME,
+    ROBOT_SPEED, STATE_MAX_TIME, REWARD_D_MAX, SOLO_RT_M,
 )
 
 
@@ -42,6 +43,9 @@ class WarehouseLayout:
         # dist_norm : 이동거리(삽입 detour 등) 정규화 기준
         self.coord_norm = max(self.total_width, self.total_height)
         self.dist_norm  = self.total_width + self.total_height
+        # reward_d_max: 삽입 detour 보상 정규화 기준, solo_rt_m: 주문 1건 단독 왕복 거리 추정치
+        self.reward_d_max = REWARD_D_MAX
+        self.solo_rt_m    = SOLO_RT_M
 
         self.workstations = self._build_workstations()
         self.workstation  = self.workstations[0]
@@ -334,6 +338,18 @@ class Robot:
         self.progress          = 0.0
         self.total_travel_time = 0.0
         self._travel_start     = None
+        # 그리드 이동 모드 전용: 피킹/워크스테이션 처리 잔여 시간, 우회 경로, 연속 대기 틱
+        self.timer             = 0.0
+        self.timer_kind        = None
+        self.detour            = []
+        self.wait_ticks        = 0
+        self.park_spot         = None
+        # 그리드 예약 모드 전용: 경로가 바뀔 때마다 route_version이 오르고, 계획은 plan_version 기준
+        self.route_version     = 0
+        self.plan_version      = 0
+        self.plan              = deque()     # (틱, 셀) 순서의 예약 경로
+        self.replan_pending    = False
+        self.pending_insert    = []          # 계획 실패로 아직 경로에 넣지 못한 삽입 주문 위치
 
     def start_travel(self, now: float):
         """이동 시작 시각을 기록한다 (이미 이동 중이면 무시).
@@ -420,6 +436,7 @@ class Robot:
         self.route       = route
         self.idle_slots  = self.capacity - len(destinations)
         self.is_idle     = False
+        self.route_version += 1
         self._start_move()
 
     def insert_and_reorder(self, loc: Tuple[float, float],
@@ -440,6 +457,7 @@ class Robot:
         self.workstation     = layout.workstations[best_ws_id]
         self.route       = new_route
         self.idle_slots  = max(0, self.idle_slots - 1)
+        self.route_version += 1
 
     def delta_distance_insert(self, loc: Tuple[float, float],
                                layout: WarehouseLayout,

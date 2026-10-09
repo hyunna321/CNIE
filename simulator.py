@@ -2,19 +2,24 @@
 import heapq
 import math
 import random
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional
 
 import numpy as np
 
 from environment import WarehouseLayout, Robot, nearest_workstation
+from reservation import ReservationTable, plan_leg
 from agents import DQNAgent
 from metrics import EpisodeResult
 from constant import (
-    SIM_TIME, ROBOT_SPEED, NUM_ROBOTS, ROBOT_CAPACITY, SOLO_RT_M, DEFAULT_SEED,
-    REWARD_D_MAX, REWARD_GAMMA_Q, REWARD_ALPHA_MID, REWARD_ALPHA_IDLE,
+    SIM_TIME, ROBOT_SPEED, NUM_ROBOTS, ROBOT_CAPACITY, DEFAULT_SEED,
+    REWARD_GAMMA_Q, REWARD_ALPHA_MID, REWARD_ALPHA_IDLE,
     REWARD_BETA_DEPLETION, REWARD_MODE_DEFAULT, GAMMA,
     SMDP_BETA, SMDP_COST_DIST, SMDP_REWARD_SCALE,
+    CELL_SIZE, PICK_TIME, WS_PROC_TIME,
+    GRID_REPLAN_WAIT, GRID_DETOUR_MAX_EXTRA, GRID_DEADLOCK_TICKS,
 )
 
 
@@ -73,6 +78,10 @@ class EventQueue:
 
     def __len__(self):
         return len(self._q)
+
+    def peek_time(self) -> float:
+        """가장 이른 사건의 시각 (비어 있으면 inf)."""
+        return self._q[0].time if self._q else math.inf
 
 
 class OrderManager:
@@ -249,7 +258,7 @@ def compute_reward(
     """
     alpha   = alpha_idle if robot.is_idle else alpha_mid
 
-    reward  = float(np.exp(-alpha * delta_d / REWARD_D_MAX))
+    reward  = float(np.exp(-alpha * delta_d / layout.reward_d_max))
 
     if gamma_q > 0.0:
         queue_pressure = min(n_wait / max(1, num_robots * robot_capacity), 1.0)
@@ -278,6 +287,14 @@ class SimulatorBase:
 
     하위 클래스는 _on_order_arrival()로 배정 정책을 정의하고, 필요하면
     _on_trip_complete()를 바꾼다.
+
+    layout이 GridWarehouseLayout이면 로봇 이동을 셀 단위 틱(CELL_SIZE / ROBOT_SPEED)으로
+    시뮬레이션한다 (_run_grid). 배정 결정은 그대로 주문 도착 사건 시점에 일어나고,
+    결정 시점의 로봇 위치는 직전 틱 기준이다. 이동거리는 실제로 이동한 셀 수로 센다.
+    충돌 처리는 layout.motion으로 고른다.
+      - "reactive": 매 틱 다음 셀이 비어 있으면 이동하고, 막히면 대기/우회한다.
+      - "reserve": 로봇의 경로가 바뀔 때(배정, 삽입, 재출발) 그 로봇의 트립 전체를
+        시공간 경로로 계획해 예약표에 올리고, 매 틱 예약대로 이동시킨다 (_reserve_plan).
     """
 
     def __init__(self, layout: WarehouseLayout, lam: float, seed: int,
@@ -311,6 +328,13 @@ class SimulatorBase:
         self._mid_trip_count:        int                    = 0
         self._extra_travel:          float                  = 0.0
         self._n_in_system:           int                    = 0
+        self.grid:                   bool                   = getattr(layout, "is_grid", False)
+        self._blocked_time:          float                  = 0.0
+        self._n_replans:             int                    = 0
+        self.reserve:                bool                   = self.grid and layout.motion == "reserve"
+        self._n_plans:               int                    = 0
+        self._n_plan_fail:           int                    = 0
+        self._plan_time:             float                  = 0.0
 
     def _build_robots(self) -> List[Robot]:
         """로봇을 생성하고 워크스테이션에 라운드로빈으로 초기 배치한다.
@@ -343,29 +367,53 @@ class SimulatorBase:
         self._mid_trip_count        = 0
         self._extra_travel          = 0.0
         self._n_in_system           = 0
+        self._blocked_time          = 0.0
+        self._n_replans             = 0
+        self._n_plans               = 0
+        self._n_plan_fail           = 0
+        self._plan_time             = 0.0
         for r in self.robots:
             r.reset()
+        if self.grid:
+            for r, pos in zip(self.robots, self.layout.initial_positions(self.num_robots)):
+                r.pos, r.park_spot = pos, pos
+            self._spots_taken = {r.park_spot for r in self.robots}
+            self._occ: Dict[Tuple[int, int], int] = {r.pos: r.id for r in self.robots}
+            self._last_move_time = 0.0
+            # 예약 모드: 지금 계획을 세우면 경로가 시작되는 틱 (주문 도착 시 직전 틱, 틱 처리 중이면 그 틱)
+            self._t0_ctx = 0
+            if self.reserve:
+                self._res = ReservationTable()
+                for r in self.robots:
+                    self._res.set_rest(r.id, self.layout.cell_index[r.pos], 0)
         t0 = self.order_mgr.generate_next_arrival(0.0)
         self.eq.push(Event(t0, EVENT_ORDER_ARRIVAL))
 
     def run(self):
         """sim_time까지 사건을 시각 순으로 처리한다."""
+        if self.grid:
+            self._run_grid()
+            return
         while self.eq:
             ev = self.eq.pop()
             if ev.time > self.sim_time:
                 break
             self._advance_clock(ev.time)
             if ev.etype == EVENT_ORDER_ARRIVAL:
-                self._n_in_system += 1
-                self._on_order_arrival()
-                nxt = self.order_mgr.generate_next_arrival(self.now)
-                if nxt <= self.sim_time:
-                    self.eq.push(Event(nxt, EVENT_ORDER_ARRIVAL))
+                self._handle_order_event()
             elif ev.etype == EVENT_NODE_ARRIVAL:
                 self._handle_node_arrival(ev)
             elif ev.etype == EVENT_TRIP_COMPLETE:
                 self._on_trip_complete(self.robots[ev.data["robot_id"]])
         self._advance_clock(self.sim_time)
+
+    def _handle_order_event(self):
+        """주문 도착 사건: 배정 정책을 호출하고 다음 도착 사건을 예약한다."""
+        self._n_in_system += 1
+        self._on_order_arrival()
+        nxt = self.order_mgr.generate_next_arrival(self.now)
+        if nxt <= self.sim_time:
+            self.eq.push(Event(nxt, EVENT_ORDER_ARRIVAL))
 
     def _advance_clock(self, t: float):
         """시각을 t로 옮기며 [now, t] 구간의 상태를 _on_interval()에 넘긴다.
@@ -411,7 +459,9 @@ class SimulatorBase:
         출력:
             Robot 리스트
         """
-        busy     = [r for r in self.robots if not r.is_idle and r.idle_slots > 0]
+        # 워크스테이션 처리 중인 로봇은 트립이 끝나는 중이므로 삽입 후보에서 뺀다 (그리드 모드).
+        busy     = [r for r in self.robots
+                    if not r.is_idle and r.idle_slots > 0 and r.timer_kind != "ws"]
         idle_any = [r for r in self.robots if r.is_idle and r.idle_slots > 0]
         return busy + idle_any
 
@@ -457,6 +507,10 @@ class SimulatorBase:
         if robot.is_idle:
             robot.assign_trip([order.loc], self.layout)
             self._schedule_next(robot)
+        elif self.reserve:
+            robot.idle_slots = max(0, robot.idle_slots - 1)
+            self._reserve_insert(robot, robot.pending_insert + [order.loc])
+            self._mid_trip_count += 1
         else:
             robot.insert_and_reorder(order.loc, self.layout)
             self._mid_trip_count += 1
@@ -520,6 +574,23 @@ class SimulatorBase:
         """
         if robot.current_dest is None:
             return
+        if self.reserve:
+            # 경로가 바뀐 경우에만 트립 전체를 다시 계획한다 (경유지 도착 등 계획대로 진행되는 사건은 그대로).
+            if robot.route_version != robot.plan_version:
+                self._reserve_plan(robot)
+            robot.start_travel(self.now)
+            if robot.pos == robot.current_dest:
+                self._grid_on_arrive(robot)
+            return
+        if self.grid:
+            # 그리드 모드에서는 _grid_tick()이 셀 단위로 이동시키고 거리를 센다.
+            # 목적지가 바뀌었으므로 이전 우회 경로와 주차 칸 예약은 버린다.
+            robot.detour = []
+            self._grid_release_spot(robot)
+            robot.start_travel(self.now)
+            if robot.pos == robot.current_dest:
+                self._grid_on_arrive(robot)
+            return
         seg = max(0.0, self.layout.aisle_distance(robot.pos, robot.current_dest) - robot.progress)
         self._robot_trip_distance[robot.id] += seg
         self._total_sim_distance            += seg
@@ -559,7 +630,7 @@ class SimulatorBase:
         if self._mid_trip_count == 0:
             return 0.0
         extra_per = self._extra_travel / self._mid_trip_count
-        return SOLO_RT_M - extra_per
+        return self.layout.solo_rt_m - extra_per
 
     def build_result(self, label: str, episode: int, lam: float,
                      reward: float = 0.0, epsilon: float = 0.0) -> EpisodeResult:
@@ -591,7 +662,369 @@ class SimulatorBase:
             saving_per_insertion = self.saving_per_insertion(),
             reward               = reward,
             epsilon              = epsilon,
+            blocked_time         = self._blocked_time,
+            n_replans            = self._n_replans,
+            n_plans              = self._n_plans,
+            n_plan_fail          = self._n_plan_fail,
+            plan_time_s          = self._plan_time,
         )
+
+    # 그리드 이동 엔진
+
+    def _run_grid(self):
+        """고정 간격 틱으로 로봇을 이동시키며, 틱 사이에 도착한 주문은 도착 시각에 처리한다.
+
+        틱 시각은 k · tick으로 주문 도착과 무관하게 고정된다. 움직일 로봇도, 진행 중인
+        피킹/처리도 없으면 다음 주문 도착 직후 틱으로 건너뛴다.
+        """
+        dt = self.layout.tick
+        k  = 1
+        while True:
+            t_ev = self.eq.peek_time()
+            if not self._grid_active():
+                if math.isinf(t_ev):
+                    break
+                k = max(k, math.ceil(t_ev / dt))
+            t_tick = k * dt
+            if min(t_ev, t_tick) > self.sim_time:
+                break
+            if t_ev <= t_tick:
+                self.eq.pop()
+                self._advance_clock(t_ev)
+                self._t0_ctx = k - 1
+                self._handle_order_event()
+            else:
+                self._advance_clock(t_tick)
+                self._t0_ctx = k
+                if self.reserve:
+                    self._reserve_tick(k)
+                else:
+                    self._grid_tick()
+                k += 1
+        self._advance_clock(self.sim_time)
+
+    def _grid_wants_move(self, r: Robot) -> bool:
+        """트립 중이고 목적지로 이동해야 하는 로봇인지."""
+        return r.timer == 0.0 and r.current_dest is not None and r.pos != r.current_dest
+
+    def _grid_can_park(self, r: Robot) -> bool:
+        """idle 로봇이 예약한 주차 칸으로 가는 중인지."""
+        return (r.is_idle and r.current_dest is None
+                and r.park_spot is not None and r.pos != r.park_spot)
+
+    def _grid_assign_spot(self, r: Robot):
+        """트립을 마친 idle 로봇에 현재 워크스테이션의 빈 주차 칸 중 도킹 셀에서 가장 가까운 칸을 예약한다.
+
+        빈 칸이 없으면 (WS_PARK_CELLS < M일 때만 가능) 도킹 셀에 그대로 머문다.
+        """
+        for c in self.layout.spots_by_dist[r.workstation_id]:
+            if c not in self._spots_taken:
+                r.park_spot = c
+                self._spots_taken.add(c)
+                return
+
+    def _grid_release_spot(self, r: Robot):
+        """r의 주차 칸 예약을 푼다."""
+        if r.park_spot is not None:
+            self._spots_taken.discard(r.park_spot)
+            r.park_spot = None
+
+    def _grid_active(self) -> bool:
+        """다음 틱에 진행할 일이 있는지 (이동, 피킹/처리 타이머, 주차 칸으로 이동, 재계획 대기)."""
+        if self.reserve:
+            return any(r.plan or r.timer > 0.0 or r.replan_pending for r in self.robots)
+        return any(r.timer > 0.0 or self._grid_wants_move(r) or self._grid_can_park(r)
+                   for r in self.robots)
+
+    def _grid_free(self, cell) -> bool:
+        return (not self.layout.collisions) or cell not in self._occ
+
+    def _grid_next_cell(self, r: Robot):
+        """이번 틱에 r이 들어갈 셀. 막혀 있으면 None.
+
+        최단경로상 다음 셀 후보 중 비어 있는 것을 고르고, GRID_REPLAN_WAIT 틱 이상
+        막혔으면 점유 셀을 피하는 우회 경로를 찾는다 (최단 대비 GRID_DETOUR_MAX_EXTRA칸 이내).
+        """
+        L = self.layout
+        goal = r.current_dest if r.current_dest is not None else r.park_spot
+        if r.detour:
+            if self._grid_free(r.detour[0]):
+                return r.detour.pop(0)
+            r.detour = []
+        hops = L.next_hops(r.pos, goal)
+        for c in hops:
+            if self._grid_free(c):
+                return c
+        if r.wait_ticks + 1 >= GRID_REPLAN_WAIT and goal not in hops:
+            base = L.aisle_distance(r.pos, goal) / CELL_SIZE
+            path = L.detour_path(r.pos, goal, set(self._occ),
+                                 max_len=int(base) + GRID_DETOUR_MAX_EXTRA)
+            if path:
+                self._n_replans += 1
+                r.detour = path
+                return r.detour.pop(0)
+        return None
+
+    def _grid_tick(self):
+        """한 틱 진행: 타이머 감소 -> 이동 -> 도착 처리 -> 교착 감시."""
+        dt = self.layout.tick
+        done = self._grid_run_timers()
+        movers  = [r for r in self.robots
+                   if r.id not in done and (self._grid_wants_move(r) or self._grid_can_park(r))]
+        moved   = set()
+        changed = True
+        # 앞 로봇이 비운 셀로 뒤 로봇이 같은 틱에 따라 들어갈 수 있도록 변화가 없을 때까지 반복
+        while changed:
+            changed = False
+            for r in movers:
+                if r.id in moved:
+                    continue
+                nxt = self._grid_next_cell(r)
+                if nxt is None:
+                    continue
+                if self.layout.collisions:
+                    del self._occ[r.pos]
+                    self._occ[nxt] = r.id
+                r.pos = nxt
+                self._robot_trip_distance[r.id] += CELL_SIZE
+                self._total_sim_distance        += CELL_SIZE
+                moved.add(r.id)
+                changed = True
+
+        for r in movers:
+            if r.id in moved:
+                r.wait_ticks = 0
+            else:
+                r.wait_ticks += 1
+                if r.current_dest is not None:          # 주차하러 가는 idle 로봇의 대기는 세지 않는다
+                    self._blocked_time += dt
+        for r in movers:
+            if r.id in moved and r.current_dest is not None and r.pos == r.current_dest:
+                self._grid_on_arrive(r)
+
+        if moved:
+            self._last_move_time = self.now
+        elif (self.now - self._last_move_time > GRID_DEADLOCK_TICKS * dt
+              and not any(r.timer > 0.0 for r in self.robots)
+              and any(self._grid_wants_move(r) for r in self.robots)):
+            stuck = [(r.id, r.pos, r.current_dest) for r in self.robots if self._grid_wants_move(r)]
+            raise RuntimeError(f"그리드 교착: t={self.now:.0f}s, {GRID_DEADLOCK_TICKS}틱 동안 이동 없음. "
+                               f"(로봇, 위치, 목적지) = {stuck}")
+
+    def _grid_run_timers(self) -> set:
+        """피킹/워크스테이션 처리 타이머를 한 틱 줄이고, 끝난 로봇의 다음 단계를 처리한다.
+
+        출력:
+            이번 틱에 타이머가 끝난 로봇 id 집합. 이 로봇들은 이번 틱에는 움직이지 않으므로,
+            머무는 시간 T초는 도착 틱 + T틱 동안 셀을 점유하는 것이 된다.
+        """
+        dt   = self.layout.tick
+        done = set()
+        for r in self.robots:
+            if r.timer > 0.0:
+                r.timer -= dt
+                if r.timer <= 1e-9:
+                    r.timer, kind = 0.0, r.timer_kind
+                    r.timer_kind = None
+                    done.add(r.id)
+                    if kind == "pick":
+                        self._grid_after_node(r)
+                    else:
+                        self._grid_finish_trip(r)
+        return done
+
+    def _grid_on_arrive(self, r: Robot):
+        """r이 current_dest 셀에 들어섰을 때: 피킹 셀이면 피킹 시간을 시작하고, 아니면 바로 다음 단계로."""
+        if not self.layout.is_dock(r.pos) and PICK_TIME > 0.0:
+            r.timer, r.timer_kind = PICK_TIME, "pick"
+            return
+        self._grid_after_node(r)
+
+    def _grid_after_node(self, r: Robot):
+        """경유지 처리를 마친 뒤 다음 목적지로 보내거나, 복귀 도킹 셀이면 워크스테이션 처리를 시작한다.
+
+        연속 모드 _handle_node_arrival()과 같은 규칙을 따른다.
+        """
+        r.end_travel(self.now)
+        if r.arrive_at_node():
+            self._schedule_next(r)
+            return
+        if self.reserve and r.pending_insert:
+            # 삽입 계획이 실패한 채 복귀 도킹 셀에 왔으면, 내리지 않고 대기 주문을 경로에 넣어 다시 나간다
+            # (연속 모드에서 복귀 중 삽입된 주문을 처리하는 방식과 같다).
+            locs, r.pending_insert = r.pending_insert, []
+            slots = r.idle_slots
+            for loc in locs:
+                r.insert_and_reorder(loc, self.layout)
+            r.idle_slots = slots
+            r._start_move()
+            self._reserve_plan(r)
+            r.start_travel(self.now)
+            return
+        if r.pos == r.workstation:
+            proc = WS_PROC_TIME * len(self._robot_orders[r.id])
+            if proc > 0.0:
+                r.timer, r.timer_kind = proc, "ws"
+            else:
+                self._grid_finish_trip(r)
+        else:
+            r.current_dest = r.workstation
+            self._schedule_next(r)
+
+    def _grid_finish_trip(self, r: Robot):
+        """워크스테이션 처리를 마치고 트립을 완료한다 (대기 주문이 있으면 바로 새 트립).
+
+        새 트립이 없으면 idle 로봇은 주차 칸으로 이동한다.
+        """
+        if r.pending_insert:
+            raise RuntimeError(f"로봇 {r.id}: 삽입 대기 주문 {r.pending_insert}이 남은 채 트립 완료 (t={self.now:.0f})")
+        self._on_trip_complete(r)
+        if r.is_idle and r.current_dest is None and not self.reserve:
+            self._grid_assign_spot(r)
+
+    # 그리드 예약 모드 (motion="reserve")
+
+    def _reserve_tick(self, k: int):
+        """예약 모드 한 틱: 타이머 -> 예약대로 이동 -> 도착 처리 -> 재계획 대기 로봇 재시도."""
+        dt = self.layout.tick
+        self._grid_run_timers()
+
+        moved = []
+        for r in self.robots:
+            if r.plan and r.plan[0][0] == k:
+                _, cell = r.plan.popleft()
+                if cell != r.pos:
+                    if r.timer > 0.0:
+                        raise RuntimeError(f"예약 불일치: 로봇 {r.id}가 {r.timer_kind} 중인데 {r.pos}->{cell} 이동 계획 (t={self.now:.0f})")
+                    r.pos = cell
+                    self._robot_trip_distance[r.id] += CELL_SIZE
+                    self._total_sim_distance        += CELL_SIZE
+                    moved.append(r)
+                    continue
+            elif r.plan and r.plan[0][0] < k:
+                raise RuntimeError(f"예약 불일치: 로봇 {r.id}의 계획 틱 {r.plan[0][0]} < 현재 틱 {k}")
+            if r.current_dest is not None and r.timer == 0.0 and r.pos != r.current_dest:
+                self._blocked_time += dt                # 예약 때문에 제자리에서 기다린 시간
+        for r in moved:
+            if r.current_dest is not None and r.pos == r.current_dest:
+                self._grid_on_arrive(r)
+        # 이 틱의 위치가 확정된 뒤 재시도한다 (계획 시작 틱 = k)
+        for r in self.robots:
+            if r.pending_insert:
+                self._reserve_insert(r, r.pending_insert)
+            elif r.replan_pending:
+                self._reserve_plan(r)
+        if k % 600 == 0:
+            self._res.prune(k - 1)
+
+    def _reserve_plan(self, r: Robot) -> bool:
+        """r의 남은 트립 전체를 시공간 경로로 계획해 예약표에 올린다. 성공 여부를 돌려준다.
+
+        경로: (피킹 중이면 남은 피킹 시간만큼 대기) -> current_dest -> 남은 경유지 (NNH 순서)
+              -> 복귀 도킹 셀 (처리 시간만큼 머묾) -> 빈 주차 칸 (무기한 머묾).
+        계획 시작 틱은 self._t0_ctx이고, 그 이후의 기존 예약은 지우고 다시 짠다.
+        실패하면 기존 예약을 되살리고 replan_pending으로 표시해 다음 틱에 다시 시도한다.
+        """
+        L, tab = self.layout, self._res
+        t0 = self._t0_ctx
+        dt = L.tick
+        wall = time.perf_counter()
+        idx = L.cell_index
+        removed, old_rest = tab.clear_after(r.id, t0)
+        old_spot = r.park_spot
+        self._spots_taken.discard(old_spot)
+
+        # 방문 목록 [(셀, 머무는 틱)]. 같은 셀 연속 방문(같은 위치 주문 여러 건)은 한 번 방문해
+        # 피킹 시간 × 건수만큼 머문다 (시뮬레이터도 도착 즉시 다음 피킹을 이어서 시작한다).
+        pick_ticks = int(math.ceil(PICK_TIME / dt - 1e-9))
+        stay0 = 0
+        visits = []
+        if r.timer_kind == "pick":
+            stay0 = int(round(r.timer / dt))
+        elif r.current_dest is not None:
+            visits.append(r.current_dest)
+        visits += list(r.route)
+        if not (visits and visits[-1] == r.workstation and not r.route):
+            visits.append(r.workstation)
+        n_totes = len(self._robot_orders[r.id])
+        legs = []
+        for i, c in enumerate(visits):
+            if L.is_dock(c):
+                d = int(math.ceil(WS_PROC_TIME * n_totes / dt - 1e-9)) if i == len(visits) - 1 else 0
+            else:
+                d = pick_ticks
+            if not L.is_dock(c) and ((legs and legs[-1][0] == c) or (not legs and r.timer_kind == "pick" and c == r.pos)):
+                if legs:
+                    legs[-1] = (c, legs[-1][1] + d)
+                else:
+                    stay0 += d
+                continue
+            legs.append((c, d))
+
+        cells, cur, t, ok = [], idx[r.pos], t0, True
+        for tt in range(t0 + 1, t0 + stay0 + 1):
+            if not tab.can_enter(cur, cur, tt, r.id):
+                ok = False
+                break
+            cells.append(cur)
+        t = t0 + stay0
+        if ok:
+            for c, d in legs:
+                res = plan_leg(tab, L.out_nbrs, L.dist_to(c), r.id, cur, t, idx[c], d, final=False)
+                if res is None:
+                    ok = False
+                    break
+                path, t = res
+                cells += path
+                cur = idx[c]
+        spot = None
+        if ok:
+            ok = False
+            for cand in L.spots_by_dist[L.dock_ws[r.workstation]]:
+                if cand in self._spots_taken:
+                    continue
+                res = plan_leg(tab, L.out_nbrs, L.dist_to(cand), r.id, cur, t, idx[cand], 0, final=True)
+                if res is not None:
+                    cells += res[0]
+                    spot, ok = cand, True
+                    break
+
+        if ok:
+            tab.commit(r.id, t0, cells, idx[spot])
+            r.plan = deque((t0 + 1 + i, L.cells[c]) for i, c in enumerate(cells))
+            r.park_spot = spot
+            self._spots_taken.add(spot)
+            r.plan_version   = r.route_version
+            r.replan_pending = False
+            self._n_plans   += 1
+        else:
+            tab.restore(r.id, removed, old_rest)
+            r.park_spot = old_spot
+            if old_spot is not None:
+                self._spots_taken.add(old_spot)
+            r.replan_pending = True
+            self._n_plan_fail += 1
+        self._plan_time += time.perf_counter() - wall
+        return ok
+
+    def _reserve_insert(self, r: Robot, locs: List[Tuple[int, int]]) -> bool:
+        """이동 중인 r의 경로에 locs를 삽입하고 다시 계획한다.
+
+        계획에 실패하면 경로 변경을 되돌리고 locs를 삽입 대기(pending_insert)로 둔다.
+        이렇게 하면 r은 기존 계획과 일치하는 경로로 계속 움직이고, 다음 틱에 다시 시도한다.
+        빈 슬롯 수는 배정 시점에 이미 줄여 두므로 되돌리지 않는다.
+        """
+        snap = (list(r.route), r.workstation, r.workstation_id, r.idle_slots, r.route_version)
+        for loc in locs:
+            r.insert_and_reorder(loc, self.layout)
+        r.idle_slots = snap[3]
+        if self._reserve_plan(r):
+            r.pending_insert = []
+            return True
+        r.route, r.workstation, r.workstation_id, _, r.route_version = snap
+        r.pending_insert = list(locs)
+        r.replan_pending = True
+        return False
 
 
 class RLSimulator(SimulatorBase):

@@ -29,6 +29,11 @@ class EpisodeResult:
     saving_per_insertion:   float = 0.0   # m, 삽입 1건당 절감 이동거리
     reward:                 float = 0.0
     epsilon:                float = 0.0
+    blocked_time:           float = 0.0   # robot·s, 다른 로봇에 막혀 기다린 시간 (그리드 모드)
+    n_replans:              int   = 0     # 우회 경로 재계획 횟수 (그리드 reactive 모드)
+    n_plans:                int   = 0     # 시공간 경로계획 횟수 (그리드 reserve 모드)
+    n_plan_fail:            int   = 0     # 경로계획 실패 횟수 (그리드 reserve 모드)
+    plan_time_s:            float = 0.0   # 경로계획에 쓴 실행 시간 (그리드 reserve 모드)
 
     @property
     def completion_rate(self) -> float:
