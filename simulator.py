@@ -1,5 +1,6 @@
 """이산 사건 창고 시뮬레이터: 주문/사건 관리, 공통 엔진, RL 배정 시뮬레이터."""
 import heapq
+import math
 import random
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional
@@ -12,7 +13,8 @@ from metrics import EpisodeResult
 from constant import (
     SIM_TIME, ROBOT_SPEED, NUM_ROBOTS, ROBOT_CAPACITY, SOLO_RT_M, DEFAULT_SEED,
     REWARD_D_MAX, REWARD_GAMMA_Q, REWARD_ALPHA_MID, REWARD_ALPHA_IDLE,
-    REWARD_BETA_DEPLETION,
+    REWARD_BETA_DEPLETION, REWARD_MODE_DEFAULT, GAMMA,
+    SMDP_BETA, SMDP_COST_DIST, SMDP_REWARD_SCALE,
 )
 
 
@@ -308,6 +310,7 @@ class SimulatorBase:
         self._total_trips:           int                    = 0
         self._mid_trip_count:        int                    = 0
         self._extra_travel:          float                  = 0.0
+        self._n_in_system:           int                    = 0
 
     def _build_robots(self) -> List[Robot]:
         """로봇을 생성하고 워크스테이션에 라운드로빈으로 초기 배치한다.
@@ -339,6 +342,7 @@ class SimulatorBase:
         self._total_trips           = 0
         self._mid_trip_count        = 0
         self._extra_travel          = 0.0
+        self._n_in_system           = 0
         for r in self.robots:
             r.reset()
         t0 = self.order_mgr.generate_next_arrival(0.0)
@@ -350,8 +354,9 @@ class SimulatorBase:
             ev = self.eq.pop()
             if ev.time > self.sim_time:
                 break
-            self.now = ev.time
+            self._advance_clock(ev.time)
             if ev.etype == EVENT_ORDER_ARRIVAL:
+                self._n_in_system += 1
                 self._on_order_arrival()
                 nxt = self.order_mgr.generate_next_arrival(self.now)
                 if nxt <= self.sim_time:
@@ -360,6 +365,30 @@ class SimulatorBase:
                 self._handle_node_arrival(ev)
             elif ev.etype == EVENT_TRIP_COMPLETE:
                 self._on_trip_complete(self.robots[ev.data["robot_id"]])
+        self._advance_clock(self.sim_time)
+
+    def _advance_clock(self, t: float):
+        """시각을 t로 옮기며 [now, t] 구간의 상태를 _on_interval()에 넘긴다.
+
+        사건 사이에는 시스템 내 주문 수와 이동 중 로봇 수가 바뀌지 않는다.
+
+        입력:
+            t: 새 시각 (s)
+        """
+        if t > self.now:
+            n_busy = sum(1 for r in self.robots if not r.is_idle)
+            self._on_interval(self.now, t, self._n_in_system, n_busy)
+        self.now = t
+
+    def _on_interval(self, t0: float, t1: float, n_in_system: int, n_busy: int):
+        """사건 사이 구간 [t0, t1] 훅. 기본은 아무 것도 하지 않는다.
+
+        입력:
+            t0, t1: 구간 시작/끝 시각 (s)
+            n_in_system: 구간 동안 시스템 내 주문 수 (도착 − 완료)
+            n_busy: 구간 동안 이동 중인 로봇 수
+        """
+        pass
 
     def _on_order_arrival(self):
         """새 주문 도착 시 배정 정책. 하위 클래스가 구현한다."""
@@ -479,6 +508,7 @@ class SimulatorBase:
         completed = list(self._robot_orders.pop(robot.id, []))
         for o in completed:
             self.order_mgr.record_completion(o, self.now)
+        self._n_in_system -= len(completed)
         self._total_trips            += 1
         self._robot_orders[robot.id]  = []
 
@@ -576,7 +606,8 @@ class RLSimulator(SimulatorBase):
                  lam: float, seed: int, sim_time: float = SIM_TIME,
                  num_robots: int = NUM_ROBOTS, robot_capacity: int = ROBOT_CAPACITY,
                  reward_cfg: Optional[Dict] = None,
-                 eval_mode: bool = False):
+                 eval_mode: bool = False,
+                 reward_mode: str = REWARD_MODE_DEFAULT):
         """
         입력:
             layout: WarehouseLayout
@@ -588,14 +619,20 @@ class RLSimulator(SimulatorBase):
             robot_capacity: 로봇 용량
             reward_cfg: compute_reward 가중치 덮어쓰기용 kwargs
             eval_mode: True이면 ε=0으로 실행하고 전이를 수집하지 않음
+            reward_mode: "legacy" (배정 시점 보상, 결정당 γ 할인) 또는
+                         "smdp" (결정 epoch 사이 시간 적분 비용, e^{-βτ} 할인)
         """
+        assert reward_mode in ("legacy", "smdp"), reward_mode
         super().__init__(layout, lam, seed, sim_time, num_robots, robot_capacity)
         self.agent        = agent
         self.reward_cfg   = reward_cfg or {}
         self.total_reward = 0.0
         self.eval_mode    = eval_mode
+        self.reward_mode  = reward_mode
+        # legacy: (feat, reward), smdp: (feat, 결정 시각)
         self._pending: Optional[Tuple[np.ndarray, float]] = None
         self._transitions: List[tuple] = []
+        self._smdp_cost = 0.0   # 직전 결정 이후 누적된 할인 비용
 
     def reset(self, seed: int):
         """에피소드 상태, 누적 보상, 보류 전이를 초기화한다.
@@ -606,12 +643,13 @@ class RLSimulator(SimulatorBase):
         super().reset(seed)
         self.total_reward = 0.0
         self._pending = None
+        self._smdp_cost = 0.0
 
     def run(self) -> List[tuple]:
         """에피소드 1회를 끝까지 실행한다.
 
         출력:
-            학습용 전이 리스트 [(feat, reward, next_feats, done), ...]
+            학습용 전이 리스트 [(feat, reward, next_feats, done, discount), ...]
             (eval_mode이면 빈 리스트)
         """
         self._transitions = []
@@ -622,9 +660,12 @@ class RLSimulator(SimulatorBase):
         super().run()
 
         # 마지막 결정은 다음 상태가 없으므로 done=True로 마감한다.
+        # smdp이면 sim_time까지 누적된 비용이 마지막 보상이 된다.
+        if self.reward_mode == "smdp":
+            self._close_smdp_interval()
         if not self.eval_mode and self._pending is not None:
-            feat, r = self._pending
-            self._transitions.append((feat, r, None, True))
+            feat, r, g = self._pending_transition(self.sim_time)
+            self._transitions.append((feat, r, None, True, g))
             self._pending = None
 
         if self.eval_mode:
@@ -665,23 +706,67 @@ class RLSimulator(SimulatorBase):
         delta_d = self._insertion_delta(robot, order.loc, target_coords)
         self._extra_travel += delta_d
 
-        reward = compute_reward(
-            robot, order.loc, self.layout, delta_d,
-            robots=eligible,
-            n_wait=n_wait,
-            num_robots=len(eligible),
-            robot_capacity=self.robot_capacity,
-            **self.reward_cfg,
-        )
-        self.total_reward += reward
+        if self.reward_mode == "legacy":
+            reward = compute_reward(
+                robot, order.loc, self.layout, delta_d,
+                robots=eligible,
+                n_wait=n_wait,
+                num_robots=len(eligible),
+                robot_capacity=self.robot_capacity,
+                **self.reward_cfg,
+            )
+            self.total_reward += reward
+        else:
+            self._close_smdp_interval()
 
         self._assign_order(robot, order)
 
-        if self.eval_mode:
-            return
-
         # 직전 결정을 지금의 후보 특징으로 완성하고, 이번 결정은 보류한다.
-        if self._pending is not None:
-            feat_prev, r_prev = self._pending
-            self._transitions.append((feat_prev, r_prev, cand_feats, False))
-        self._pending = (chosen_feat, reward)
+        if not self.eval_mode and self._pending is not None:
+            feat_prev, r_prev, g_prev = self._pending_transition(self.now)
+            self._transitions.append((feat_prev, r_prev, cand_feats, False, g_prev))
+        if self.reward_mode == "legacy":
+            self._pending = (chosen_feat, reward)
+        else:
+            self._pending = (chosen_feat, self.now)
+            self._smdp_cost = 0.0
+
+    def _on_interval(self, t0: float, t1: float, n_in_system: int, n_busy: int):
+        """smdp 모드에서 [t0, t1] 구간 비용을 직전 결정 시각 기준으로 할인해 누적한다.
+
+        구간 비용률 c = N(t) + c_d · v · busy(t) 는 구간 안에서 상수이므로
+        ∫_{t0}^{t1} e^{-β(t-t_k)} c dt = c · (e^{-β(t0-t_k)} − e^{-β(t1-t_k)}) / β.
+
+        입력:
+            t0, t1: 구간 시작/끝 시각 (s)
+            n_in_system: 시스템 내 주문 수
+            n_busy: 이동 중 로봇 수
+        """
+        if self.reward_mode != "smdp" or self._pending is None:
+            return
+        t_k  = self._pending[1]
+        rate = n_in_system + SMDP_COST_DIST * ROBOT_SPEED * n_busy
+        self._smdp_cost += rate * (math.exp(-SMDP_BETA * (t0 - t_k))
+                                   - math.exp(-SMDP_BETA * (t1 - t_k))) / SMDP_BETA
+
+    def _close_smdp_interval(self):
+        """직전 결정 이후 누적된 비용을 보상으로 확정해 total_reward에 더한다."""
+        if self._pending is None:
+            return
+        r = -self._smdp_cost / SMDP_REWARD_SCALE
+        self.total_reward += r
+        self._pending = (self._pending[0], self._pending[1], r)
+
+    def _pending_transition(self, t_next: float) -> Tuple[np.ndarray, float, float]:
+        """보류 중인 직전 결정을 (feat, reward, discount)로 만든다.
+
+        입력:
+            t_next: 다음 결정 시각 (s)
+        출력:
+            (선택 후보 특징, 보상, 이 전이의 할인 계수)
+        """
+        if self.reward_mode == "legacy":
+            feat, r = self._pending
+            return feat, r, GAMMA
+        feat, t_k, r = self._pending
+        return feat, r, math.exp(-SMDP_BETA * (t_next - t_k))

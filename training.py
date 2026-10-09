@@ -12,13 +12,13 @@ from metrics import MetricsStore, TrainingPoint, TrainingCurveStore, print_compa
 from simulator import RLSimulator
 from baselines import (
     FullBufferSimulator, PartialSimulator, RandomAssignSimulator,
-    NearestRobotSimulator, MinInsertionSimulator,
+    NearestRobotSimulator, MinInsertionSimulator, MarginalCostSimulator,
 )
 from constant import (
     SIM_TIME, LAMBDA_DEFAULT, DEFAULT_SEED, NUM_ROBOTS, ROBOT_CAPACITY,
     TOTAL_EPISODES, VERBOSE_EVERY, CURRICULUM_LAM_MARGIN, N_EVAL,
     EVAL_SEED_BASE, PARTIAL_K, ROBOT_SPEED, LOAD_SWEEP_SEED_BASE,
-    P_VALUE_THRESHOLD, POLICY_LABELS,
+    P_VALUE_THRESHOLD, POLICY_LABELS, REWARD_MODE_DEFAULT,
 )
 
 
@@ -33,7 +33,9 @@ def train(layout:         WarehouseLayout,
           reward_cfg:     Dict  = None,
           label:          str   = "RL",
           verbose_every:  int   = VERBOSE_EVERY,
-          curve_store:    Optional["TrainingCurveStore"] = None) -> None:
+          curve_store:    Optional["TrainingCurveStore"] = None,
+          reward_mode:    str   = REWARD_MODE_DEFAULT,
+          updates_per_episode: int = 1) -> None:
     """RL 에이전트를 학습한다.
 
     앞쪽 절반 에피소드는 λ를 [lam × CURRICULUM_LAM_MARGIN, lam]에서 무작위로
@@ -53,13 +55,15 @@ def train(layout:         WarehouseLayout,
         label: 결과 라벨
         verbose_every: 진행 로그 출력 주기 (에피소드)
         curve_store: 학습 곡선 기록용 TrainingCurveStore (선택)
+        reward_mode: "legacy" 또는 "smdp" (RLSimulator 참고)
+        updates_per_episode: 에피소드마다 수행할 train_step 횟수
     """
     reward_cfg = reward_cfg or {}
     lam_lo, lam_hi = lam * CURRICULUM_LAM_MARGIN, lam
 
     rl_sim = RLSimulator(layout, agent, lam=lam, seed=seed,
                          num_robots=num_robots, robot_capacity=robot_capacity,
-                         reward_cfg=reward_cfg)
+                         reward_cfg=reward_cfg, reward_mode=reward_mode)
     rng = random.Random(seed)
 
     for ep in range(1, total_episodes + 1):
@@ -74,7 +78,11 @@ def train(layout:         WarehouseLayout,
 
         for trans in transitions:
             agent.push(*trans)
-        loss = agent.train_step()
+        loss = None
+        for _ in range(updates_per_episode):
+            step_loss = agent.train_step()
+            if step_loss is not None:
+                loss = step_loss
         agent.decay_epsilon(total_episodes)
 
         # 누적 보상은 완료 주문 수에 비례해 커지므로, λ/K 설정 간 비교가
@@ -118,8 +126,11 @@ def evaluate_all(layout:         WarehouseLayout,
                  robot_capacity: int = ROBOT_CAPACITY,
                  eval_seeds:     List[int] = None,
                  n_eval:         int = N_EVAL,
-                 partial_k:      int = PARTIAL_K) -> None:
-    """같은 평가 시드로 RL(ε=0)과 BL1~BL5를 모두 실행해 결과를 기록한다.
+                 partial_k:      int = PARTIAL_K,
+                 rl_label:       str = "RL",
+                 reward_mode:    str = REWARD_MODE_DEFAULT,
+                 include_baselines: bool = True) -> None:
+    """같은 평가 시드로 RL(ε=0)과 BL1~BL6을 모두 실행해 결과를 기록한다.
 
     입력:
         layout: WarehouseLayout
@@ -131,6 +142,9 @@ def evaluate_all(layout:         WarehouseLayout,
         eval_seeds: 평가 시드 리스트 (None이면 EVAL_SEED_BASE부터 n_eval개)
         n_eval: eval_seeds가 None일 때 사용할 시드 수
         partial_k: BL2 출발 기준 주문 수
+        rl_label: RL 결과 라벨
+        reward_mode: RL 평가 시 보상 기록 방식 (정책에는 영향 없음)
+        include_baselines: False이면 RL만 평가
     """
     if eval_seeds is None:
         eval_seeds = list(range(EVAL_SEED_BASE, EVAL_SEED_BASE + n_eval))
@@ -139,14 +153,16 @@ def evaluate_all(layout:         WarehouseLayout,
 
         sim = RLSimulator(layout, agent, lam=lam, seed=s,
                           num_robots=num_robots, robot_capacity=robot_capacity,
-                          eval_mode=True)
+                          eval_mode=True, reward_mode=reward_mode)
         sim.reset(s)
         sim.run()
         n_done     = max(1, sim.order_mgr.completed_count())
         avg_reward = sim.total_reward / n_done
-        store.add(sim.build_result("RL", i, lam,
+        store.add(sim.build_result(rl_label, i, lam,
                                    reward=avg_reward,
                                    epsilon=0.0))
+        if not include_baselines:
+            continue
 
         sim = FullBufferSimulator(layout, lam=lam, seed=s, sim_time=SIM_TIME,
                                   num_robots=num_robots, robot_capacity=robot_capacity)
@@ -178,6 +194,12 @@ def evaluate_all(layout:         WarehouseLayout,
         sim.reset(s)
         sim.run()
         store.add(sim.build_result("BL5_MinInsertion", i, lam))
+
+        sim = MarginalCostSimulator(layout, lam=lam, seed=s, sim_time=SIM_TIME,
+                                    num_robots=num_robots, robot_capacity=robot_capacity)
+        sim.reset(s)
+        sim.run()
+        store.add(sim.build_result("BL6_MarginalCost", i, lam))
 
 
 # 부하(λ) 민감도 분석

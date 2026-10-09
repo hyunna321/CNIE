@@ -144,7 +144,7 @@ def run_lambda_grid(total_episodes: int = TOTAL_EPISODES, n_eval: int = N_EVAL,
 def run_setting(experiment_name: str, num_robots: int, num_workstations: int,
                 total_episodes: int = TOTAL_EPISODES, n_eval: int = N_EVAL,
                 out_dir: str = EXPERIMENT_OUT_DIR) -> None:
-    """(M, K) 조건 하나에서 RL을 학습하고 RL/BL1~BL5를 평가해 저장한다.
+    """(M, K) 조건 하나에서 RL을 학습하고 RL/BL1~BL6를 평가해 저장한다.
 
     저장 파일 (out_dir/experiment_name/M{m}_K{k}/):
         train.csv, training_curve.csv, evaluation.csv

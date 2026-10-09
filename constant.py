@@ -65,6 +65,14 @@ REWARD_ALPHA_MID      = 2.0    # mid-trip 삽입 detour 감쇠 계수
 REWARD_ALPHA_IDLE     = 1.0    # idle 로봇 배정 detour 감쇠 계수
 REWARD_BETA_DEPLETION = 0.2    # 마지막 빈 idle 로봇 소진 페널티
 
+# SMDP 보상 (reward_mode="smdp")
+# 결정 epoch 사이 비용 = ∫ e^{-β(t-t_k)} [N(t) + c_d · v · busy(t)] dt
+# N(t): 시스템 내 주문 수 (∫N dt = 총 flow time), busy(t): 이동 중 로봇 수
+REWARD_MODE_DEFAULT = "legacy"  # "legacy" | "smdp"
+SMDP_BETA           = 1 / 300   # 1/s, 연속시간 할인율 (≈ 트립 시간 규모)
+SMDP_COST_DIST      = 1.0       # order·s / m, 이동거리 1m를 flow time 몇 초로 환산할지
+SMDP_REWARD_SCALE   = 1000.0    # 보상 정규화 분모
+
 # 지표
 SOLO_RT_M = 80.0               # m, 주문 1건 단독 왕복 거리 추정치
 
@@ -86,6 +94,7 @@ POLICY_LABELS = [
     "BL3_Random",
     "BL4_Nearest",
     "BL5_MinInsertion",
+    "BL6_MarginalCost",
 ]
 
 # run.py robot-sweep / ws-sweep: 로봇 수 / 워크스테이션 수 스윕
@@ -122,10 +131,10 @@ REWARD_PLOT_FIGSIZE         = (8, 5.5)
 METRIC_PLOT_CSV_PATH        = "eval_all_lambdas.csv"
 METRIC_PLOT_DISPLAY_NAMES   = [
     "RL (proposed)", "BL1 Full-Buffer", "BL2 Partial-Buffer",
-    "BL3 Random", "BL4 Nearest", "BL5 Min-Insertion",
+    "BL3 Random", "BL4 Nearest", "BL5 Min-Insertion", "BL6 Marginal-Cost",
 ]
-METRIC_PLOT_COLORS          = ["#0d1b4c", "#3b5fc4", "#8fb8f0", "#bfe8e3", "#3fae7f", "#e8b93f"]
-METRIC_PLOT_BAR_WIDTH       = 0.13
+METRIC_PLOT_COLORS          = ["#0d1b4c", "#3b5fc4", "#8fb8f0", "#bfe8e3", "#3fae7f", "#e8b93f", "#c4573b"]
+METRIC_PLOT_BAR_WIDTH       = 0.11
 METRIC_PLOT_GROUP_GAP       = 0.35
 METRIC_PLOT_LEGEND_FONTSIZE = 11
 METRIC_PLOT_FIGSIZE         = (9, 6)

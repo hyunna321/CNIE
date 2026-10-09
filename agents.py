@@ -66,7 +66,8 @@ class PrioritizedReplayBuffer:
     """TD 오차 기반 우선순위 경험 재생 버퍼 (PER).
 
     저장 항목: (feat, reward, next_feats[max_candidates, feat_dim],
-               next_mask[max_candidates], done)
+               next_mask[max_candidates], done, discount)
+    discount는 n-step 이후 부트스트랩 항에 곱할 할인 계수다.
     """
 
     def __init__(self, capacity: int = REPLAY_BUFFER_SIZE, alpha: float = PER_ALPHA,
@@ -86,7 +87,7 @@ class PrioritizedReplayBuffer:
         self._max_priority = 1.0
         self.rng           = np.random.default_rng(seed)
 
-    def push(self, feat, reward, next_feats, next_mask, done):
+    def push(self, feat, reward, next_feats, next_mask, done, discount):
         """전이 1건을 현재까지의 최대 우선순위로 저장한다.
 
         입력:
@@ -95,8 +96,9 @@ class PrioritizedReplayBuffer:
             next_feats: 다음 결정 시점 후보 특징 (패딩됨)
             next_mask: next_feats 유효 마스크
             done: 종료 여부
+            discount: 부트스트랩 할인 계수
         """
-        self.buf[self.pos]        = (feat, reward, next_feats, next_mask, done)
+        self.buf[self.pos]        = (feat, reward, next_feats, next_mask, done, discount)
         self.priorities[self.pos] = self._max_priority
         self.pos  = (self.pos + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
@@ -108,7 +110,7 @@ class PrioritizedReplayBuffer:
             batch_size: 배치 크기
             beta: 중요도 샘플링 보정 지수
         출력:
-            (feat, reward, next_feats, next_mask, done, idxs, weights) numpy 배열 튜플
+            (feat, reward, next_feats, next_mask, done, discount, idxs, weights) numpy 배열 튜플
         """
         prios   = self.priorities[:self.size] ** self.alpha
         probs   = prios / prios.sum()
@@ -116,13 +118,14 @@ class PrioritizedReplayBuffer:
         weights = (self.size * probs[idxs]) ** (-beta)
         weights /= weights.max()
         batch   = [self.buf[i] for i in idxs]
-        feat, r, nf, nm, d = zip(*batch)
+        feat, r, nf, nm, d, g = zip(*batch)
         return (
             np.array(feat, dtype=np.float32),
             np.array(r,    dtype=np.float32),
             np.array(nf,   dtype=np.float32),
             np.array(nm,   dtype=np.bool_),
             np.array(d,    dtype=np.float32),
+            np.array(g,    dtype=np.float32),
             idxs,
             np.array(weights, dtype=np.float32),
         )
@@ -145,24 +148,24 @@ class PrioritizedReplayBuffer:
 class NStepBuffer:
     """n-step 누적 보상을 만들기 위한 임시 버퍼.
 
-    항목 형식: (feat, reward, next_feats, next_mask, done)
+    항목 형식: (feat, reward, next_feats, next_mask, done, discount)
+    discount는 그 전이 하나의 할인 계수다 (legacy: γ, SMDP: e^{-βτ}).
+    G = r_0 + g_0·r_1 + g_0·g_1·r_2 + ..., 부트스트랩 할인 = Π g_i.
     """
 
-    def __init__(self, n: int = N_STEP, gamma: float = GAMMA):
+    def __init__(self, n: int = N_STEP):
         """
         입력:
             n: 누적할 스텝 수
-            gamma: 할인율
         """
-        self.n     = n
-        self.gamma = gamma
-        self.buf   = deque()
+        self.n   = n
+        self.buf = deque()
 
     def push(self, transition):
         """1-step 전이를 추가한다.
 
         입력:
-            transition: (feat, reward, next_feats, next_mask, done)
+            transition: (feat, reward, next_feats, next_mask, done, discount)
         """
         self.buf.append(transition)
 
@@ -170,35 +173,36 @@ class NStepBuffer:
         """n개 이상 쌓여 n-step 전이를 만들 수 있으면 True."""
         return len(self.buf) >= self.n
 
-    def get(self):
-        """가장 오래된 전이 기준 n-step 전이를 만들고 그 전이를 버퍼에서 뺀다.
-
-        출력:
-            (feat0, G, next_feats_n, next_mask_n, done_n)
-        """
+    def _accumulate(self):
+        """가장 오래된 전이 기준 n-step 전이를 만들고 그 전이를 버퍼에서 뺀다."""
         feat0 = self.buf[0][0]
-        _, _, nf, nm, d = self.buf[-1]
-        G = 0.0
-        for i, (_, r_i, _, _, d_i) in enumerate(self.buf):
-            G += (self.gamma ** i) * r_i
+        _, _, nf, nm, d, _ = self.buf[-1]
+        G, disc = 0.0, 1.0
+        for (_, r_i, _, _, d_i, g_i) in self.buf:
+            G    += disc * r_i
+            disc *= g_i
             if d_i:
                 break
         self.buf.popleft()
-        return (feat0, G, nf, nm, d)
+        return (feat0, G, nf, nm, d, disc)
+
+    def get(self):
+        """가장 오래된 전이 기준 n-step 전이를 만든다.
+
+        출력:
+            (feat0, G, next_feats_n, next_mask_n, done_n, discount_n)
+        """
+        return self._accumulate()
 
     def flush(self):
         """에피소드 종료 시 남은 전이를 모두 n-step 전이로 변환해 비운다.
 
         출력:
-            (feat0, G, next_feats, next_mask, done) 리스트
+            (feat0, G, next_feats, next_mask, done, discount) 리스트
         """
         results = []
         while self.buf:
-            feat0     = self.buf[0][0]
-            nf, nm, d = self.buf[-1][2], self.buf[-1][3], self.buf[-1][4]
-            G = sum((self.gamma ** i) * t[1] for i, t in enumerate(self.buf))
-            self.buf.popleft()
-            results.append((feat0, G, nf, nm, d))
+            results.append(self._accumulate())
         return results
 
 
@@ -243,7 +247,7 @@ class DQNAgent:
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=LR)
         self.buffer    = PrioritizedReplayBuffer(REPLAY_BUFFER_SIZE, seed=seed)
-        self.nstep_buf = NStepBuffer(n=N_STEP, gamma=GAMMA)
+        self.nstep_buf = NStepBuffer(n=N_STEP)
 
         self.epsilon  = EPS_START
         self.beta     = PER_BETA_START
@@ -332,7 +336,8 @@ class DQNAgent:
         return int(np.argmax(q))
 
     def push(self, feat: np.ndarray, reward: float,
-            next_feats: Optional[np.ndarray], done: bool):
+            next_feats: Optional[np.ndarray], done: bool,
+            discount: float = GAMMA):
         """전이를 n-step 버퍼를 거쳐 리플레이 버퍼에 저장한다.
 
         입력:
@@ -340,13 +345,14 @@ class DQNAgent:
             reward: 즉시 보상
             next_feats: 다음 결정 시점 후보 특징 (없으면 None)
             done: 에피소드 종료 여부
+            discount: 이 전이의 할인 계수 (legacy: γ, SMDP: e^{-βτ})
         """
         if next_feats is None or len(next_feats) == 0:
             nf_pad = np.zeros((self.max_candidates, self.feat_dim), dtype=np.float32)
             nm     = np.zeros(self.max_candidates, dtype=np.bool_)
         else:
             nf_pad, nm = self._pad(np.asarray(next_feats, dtype=np.float32))
-        self.nstep_buf.push((feat, reward, nf_pad, nm, done))
+        self.nstep_buf.push((feat, reward, nf_pad, nm, done, discount))
         if self.nstep_buf.ready():
             self.buffer.push(*self.nstep_buf.get())
         if done:
@@ -364,12 +370,13 @@ class DQNAgent:
         if len(self.buffer) < BATCH_SIZE:
             return None
 
-        feat, r, nf, nm, d, idxs, weights = self.buffer.sample(BATCH_SIZE, beta=self.beta)
+        feat, r, nf, nm, d, g, idxs, weights = self.buffer.sample(BATCH_SIZE, beta=self.beta)
         feat_t = torch.tensor(feat)
         r_t    = torch.tensor(r)
         nf_t   = torch.tensor(nf)
         nm_t   = torch.tensor(nm)
         d_t    = torch.tensor(d)
+        g_t    = torch.tensor(g)
         w_t    = torch.tensor(weights)
 
         q_vals = self.policy_net(feat_t)
@@ -388,8 +395,7 @@ class DQNAgent:
             no_valid = ~nm_t.any(dim=1)
             next_q   = torch.where(no_valid, torch.zeros_like(next_q), next_q)
 
-            gamma_n = GAMMA ** N_STEP
-            target  = r_t + gamma_n * next_q * (1 - d_t)
+            target = r_t + g_t * next_q * (1 - d_t)
 
         td_errors = (q_vals - target).detach().cpu().numpy()
         self.buffer.update_priorities(idxs, td_errors)
