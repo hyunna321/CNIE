@@ -21,14 +21,18 @@ class WarehouseLayout:
     def __init__(self, seed: int = DEFAULT_SEED,
                  num_robots: int = NUM_ROBOTS,
                  robot_capacity: int = ROBOT_CAPACITY,
-                 num_workstations: int = NUM_WORKSTATIONS):
+                 num_workstations: int = NUM_WORKSTATIONS,
+                 scenario=None):
         """
         입력:
             seed: SKU 배치용 난수 시드
             num_robots: 로봇 수
             robot_capacity: 로봇 1대가 한 트립에 담을 수 있는 토트 수
             num_workstations: 워크스테이션 수 K
+            scenario: scenario.Scenario (None이면 기본값: 포아송/균등/무작위 저장/고정 시간)
         """
+        from scenario import Scenario
+        self.scenario         = scenario if scenario is not None else Scenario()
         self.num_robots       = num_robots
         self.robot_capacity   = robot_capacity
         self.num_workstations = num_workstations
@@ -60,6 +64,8 @@ class WarehouseLayout:
         self.storage_coords, self.access_coords = self._build_storage_coords()
         self.sku_ids        = list(range(NUM_SKUS))
         self.loc_to_sku, self.sku_to_locs = self._assign_skus()
+        if self.scenario.storage == "class_based" and not getattr(self, "is_grid", False):
+            self.apply_class_storage()
 
     def _build_workstations(self) -> List[Tuple[float, float]]:
         """워크스테이션 좌표를 생성한다.
@@ -123,6 +129,25 @@ class WarehouseLayout:
                 sku_to_locs[sku].append(fallback)
 
         return loc_to_sku, sku_to_locs
+
+    def apply_class_storage(self):
+        """클래스 기반 저장: 인기 SKU(id가 작은 SKU)를 워크스테이션에서 가까운 위치부터 배정한다.
+
+        위치를 가장 가까운 워크스테이션까지 거리(워크스테이션 -> 위치) 순으로 정렬하고,
+        SKU마다 같은 수의 위치를 순위대로 나눠 준다 (Hausman et al., 1976의 class-based storage를
+        SKU 순위 단위로 세분한 형태).
+        """
+        n_loc = len(self.access_coords)
+        dist  = [min(self.aisle_distance(w, self.access_coords[i]) for w in self.workstations)
+                 for i in range(n_loc)]
+        order = sorted(range(n_loc), key=lambda i: (dist[i], i))
+        n_sku = len(self.sku_ids)
+        self.loc_to_sku  = {}
+        self.sku_to_locs = {s: [] for s in self.sku_ids}
+        for rank, i in enumerate(order):
+            sku = self.sku_ids[min(n_sku - 1, rank * n_sku // n_loc)]
+            self.loc_to_sku[i] = sku
+            self.sku_to_locs[sku].append(i)
 
     def manhattan(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
         """두 점의 맨해튼(L1) 거리. 랙 통과를 허용하므로 이동 비용 계산에는 쓰지 않는다.

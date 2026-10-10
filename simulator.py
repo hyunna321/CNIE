@@ -18,7 +18,7 @@ from constant import (
     REWARD_GAMMA_Q, REWARD_ALPHA_MID, REWARD_ALPHA_IDLE,
     REWARD_BETA_DEPLETION, REWARD_MODE_DEFAULT, GAMMA,
     SMDP_BETA, SMDP_COST_DIST, SMDP_REWARD_SCALE,
-    CELL_SIZE, PICK_TIME, WS_PROC_TIME,
+    CELL_SIZE,
     GRID_REPLAN_WAIT, GRID_DETOUR_MAX_EXTRA, GRID_DEADLOCK_TICKS,
 )
 
@@ -39,6 +39,9 @@ class Order:
     arrival_time:    float
     completion_time:    Optional[float] = None
     service_start_time: Optional[float] = None   # 로봇에 배정된 시각
+    pick_s:             float = 0.0             # 랙에서 이 토트를 꺼내는 시간 (s)
+    proc_s:             float = 0.0             # 워크스테이션에서 이 토트를 처리하는 시간 (s)
+    picked:             bool  = False           # 그리드 모드: 로봇이 이미 집었는지
 
 
 EVENT_ORDER_ARRIVAL = "ORDER_ARRIVAL"
@@ -85,7 +88,7 @@ class EventQueue:
 
 
 class OrderManager:
-    """주문 생성(포아송 도착)과 단일 FIFO 대기 큐, 주문 단위 지표를 관리한다."""
+    """주문 생성(layout.scenario의 도착/수요/처리 시간 분포)과 단일 FIFO 대기 큐, 주문 단위 지표를 관리한다."""
 
     def __init__(self, layout, lam: float, seed: int = DEFAULT_SEED):
         """
@@ -103,6 +106,15 @@ class OrderManager:
         self.wait_queue:          List[Order]  = []
         self.all_orders:          List[Order]  = []
         self._queue_entry_times:  List[float]  = []
+        self.horizon            = SIM_TIME      # 비정상 도착률 프로파일의 기준 시간 (SimulatorBase가 설정)
+        self._seed_streams(seed)
+
+    def _seed_streams(self, seed: int):
+        """기본 분포가 아닌 도착 과정/처리 시간용 난수 생성기와 분포 샘플러를 만든다."""
+        from scenario import OrderStream
+        self.stream       = OrderStream(self.layout.scenario, self.lam, self.horizon, len(self.layout.sku_ids))
+        self._arrival_rng = random.Random(f"{seed}-arrival")
+        self._time_rng    = random.Random(f"{seed}-time")
 
     def reset(self, seed: int):
         """에피소드 시작 전 상태를 초기화한다.
@@ -115,16 +127,19 @@ class OrderManager:
         self.wait_queue          = []
         self._queue_entry_times  = []
         self.all_orders.clear()
+        self._seed_streams(seed)
 
-    def generate_next_arrival(self, current_time: float) -> float:
-        """지수분포 도착 간격으로 다음 주문 도착 시각을 만든다.
+    def next_arrival(self, current_time: float) -> Tuple[float, int]:
+        """다음 주문 도착 시각과 그때 들어오는 주문 수 (묶음 도착이 아니면 1).
+
+        기본 포아송이면 기존처럼 self._rng의 지수분포 간격을 쓴다.
 
         입력:
             current_time: 현재 시각 (s)
         출력:
-            다음 주문 도착 시각 (s)
+            (다음 도착 시각 (s), 주문 수)
         """
-        return current_time + self._rng.expovariate(self.lam)
+        return self.stream.next_arrival(current_time, self._rng, self._arrival_rng)
 
     def create_order(self, arrival_time: float) -> Order:
         """SKU와 보관 위치를 샘플링해 새 주문을 만들고 전체 주문 목록에 기록한다.
@@ -134,9 +149,11 @@ class OrderManager:
         출력:
             생성된 Order
         """
-        sku          = self.layout.sample_order_sku(self._rng)
+        sku          = self.stream.sample_sku(self._rng, self.layout.sku_ids)
         loc_idx, loc = self.layout.find_tote_location(sku, self._rng)
-        order        = Order(self._cnt, sku, loc_idx, loc, arrival_time)
+        order        = Order(self._cnt, sku, loc_idx, loc, arrival_time,
+                             pick_s=self.stream.sample_pick(self._time_rng),
+                             proc_s=self.stream.sample_proc(self._time_rng))
         self._cnt   += 1
         self.all_orders.append(order)
         return order
@@ -318,6 +335,7 @@ class SimulatorBase:
 
         self.robots    = self._build_robots()
         self.order_mgr = OrderManager(layout, lam=lam, seed=seed)
+        self.order_mgr.horizon = sim_time
         self.eq        = EventQueue()
         self.now       = 0.0
 
@@ -386,8 +404,8 @@ class SimulatorBase:
                 self._res = ReservationTable()
                 for r in self.robots:
                     self._res.set_rest(r.id, self.layout.cell_index[r.pos], 0)
-        t0 = self.order_mgr.generate_next_arrival(0.0)
-        self.eq.push(Event(t0, EVENT_ORDER_ARRIVAL))
+        t0, n0 = self.order_mgr.next_arrival(0.0)
+        self.eq.push(Event(t0, EVENT_ORDER_ARRIVAL, {"count": n0}))
 
     def run(self):
         """sim_time까지 사건을 시각 순으로 처리한다."""
@@ -400,20 +418,21 @@ class SimulatorBase:
                 break
             self._advance_clock(ev.time)
             if ev.etype == EVENT_ORDER_ARRIVAL:
-                self._handle_order_event()
+                self._handle_order_event(ev)
             elif ev.etype == EVENT_NODE_ARRIVAL:
                 self._handle_node_arrival(ev)
             elif ev.etype == EVENT_TRIP_COMPLETE:
                 self._on_trip_complete(self.robots[ev.data["robot_id"]])
         self._advance_clock(self.sim_time)
 
-    def _handle_order_event(self):
-        """주문 도착 사건: 배정 정책을 호출하고 다음 도착 사건을 예약한다."""
-        self._n_in_system += 1
-        self._on_order_arrival()
-        nxt = self.order_mgr.generate_next_arrival(self.now)
+    def _handle_order_event(self, ev: Event):
+        """주문 도착 사건: 들어온 주문마다 배정 정책을 호출하고 다음 도착 사건을 예약한다."""
+        for _ in range(ev.data.get("count", 1)):
+            self._n_in_system += 1
+            self._on_order_arrival()
+        nxt, n = self.order_mgr.next_arrival(self.now)
         if nxt <= self.sim_time:
-            self.eq.push(Event(nxt, EVENT_ORDER_ARRIVAL))
+            self.eq.push(Event(nxt, EVENT_ORDER_ARRIVAL, {"count": n}))
 
     def _advance_clock(self, t: float):
         """시각을 t로 옮기며 [now, t] 구간의 상태를 _on_interval()에 넘긴다.
@@ -689,10 +708,10 @@ class SimulatorBase:
             if min(t_ev, t_tick) > self.sim_time:
                 break
             if t_ev <= t_tick:
-                self.eq.pop()
+                ev = self.eq.pop()
                 self._advance_clock(t_ev)
                 self._t0_ctx = k - 1
-                self._handle_order_event()
+                self._handle_order_event(ev)
             else:
                 self._advance_clock(t_tick)
                 self._t0_ctx = k
@@ -833,11 +852,28 @@ class SimulatorBase:
                         self._grid_finish_trip(r)
         return done
 
+    def _grid_next_pick(self, r: Robot, loc, skip: int = 0) -> Optional[Order]:
+        """r이 loc에서 아직 집지 않은 주문 중 (skip+1)번째 (배정 순서). 피킹 시간의 단일 기준이다."""
+        for o in self._robot_orders[r.id]:
+            if not o.picked and o.loc == loc:
+                if skip == 0:
+                    return o
+                skip -= 1
+        return None
+
+    def _grid_ticks(self, seconds: float) -> int:
+        """머무는 시간(s)을 틱 수로 올림한다 (타이머가 끝나는 틱과 같다)."""
+        return int(math.ceil(seconds / self.layout.tick - 1e-9)) if seconds > 0.0 else 0
+
     def _grid_on_arrive(self, r: Robot):
         """r이 current_dest 셀에 들어섰을 때: 피킹 셀이면 피킹 시간을 시작하고, 아니면 바로 다음 단계로."""
-        if not self.layout.is_dock(r.pos) and PICK_TIME > 0.0:
-            r.timer, r.timer_kind = PICK_TIME, "pick"
-            return
+        if not self.layout.is_dock(r.pos):
+            o = self._grid_next_pick(r, r.pos)
+            if o is not None:
+                o.picked = True
+                if o.pick_s > 0.0:
+                    r.timer, r.timer_kind = o.pick_s, "pick"
+                    return
         self._grid_after_node(r)
 
     def _grid_after_node(self, r: Robot):
@@ -862,7 +898,7 @@ class SimulatorBase:
             r.start_travel(self.now)
             return
         if r.pos == r.workstation:
-            proc = WS_PROC_TIME * len(self._robot_orders[r.id])
+            proc = sum(o.proc_s for o in self._robot_orders[r.id])
             if proc > 0.0:
                 r.timer, r.timer_kind = proc, "ws"
             else:
@@ -934,25 +970,28 @@ class SimulatorBase:
         old_spot = r.park_spot
         self._spots_taken.discard(old_spot)
 
-        # 방문 목록 [(셀, 머무는 틱)]. 같은 셀 연속 방문(같은 위치 주문 여러 건)은 한 번 방문해
-        # 피킹 시간 × 건수만큼 머문다 (시뮬레이터도 도착 즉시 다음 피킹을 이어서 시작한다).
-        pick_ticks = int(math.ceil(PICK_TIME / dt - 1e-9))
+        # 방문 목록 [(셀, 머무는 틱)]. 피킹 시간은 그 셀에서 아직 집지 않은 주문을 배정 순서대로
+        # 쓴다 (_grid_on_arrive와 같은 기준). 같은 셀 연속 방문(같은 위치 주문 여러 건)은 한 번
+        # 방문해 각 주문의 피킹 시간을 합한 만큼 머문다 (시뮬레이터도 도착 즉시 다음 피킹을 시작한다).
         stay0 = 0
         visits = []
         if r.timer_kind == "pick":
-            stay0 = int(round(r.timer / dt))
+            stay0 = self._grid_ticks(r.timer)
         elif r.current_dest is not None:
             visits.append(r.current_dest)
         visits += list(r.route)
         if not (visits and visits[-1] == r.workstation and not r.route):
             visits.append(r.workstation)
-        n_totes = len(self._robot_orders[r.id])
+        proc_s = sum(o.proc_s for o in self._robot_orders[r.id])
+        seen: Dict[Tuple[int, int], int] = {}
         legs = []
         for i, c in enumerate(visits):
             if L.is_dock(c):
-                d = int(math.ceil(WS_PROC_TIME * n_totes / dt - 1e-9)) if i == len(visits) - 1 else 0
+                d = self._grid_ticks(proc_s) if i == len(visits) - 1 else 0
             else:
-                d = pick_ticks
+                o = self._grid_next_pick(r, c, seen.get(c, 0))
+                seen[c] = seen.get(c, 0) + 1
+                d = self._grid_ticks(o.pick_s) if o is not None else 0
             if not L.is_dock(c) and ((legs and legs[-1][0] == c) or (not legs and r.timer_kind == "pick" and c == r.pos)):
                 if legs:
                     legs[-1] = (c, legs[-1][1] + d)

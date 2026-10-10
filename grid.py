@@ -66,7 +66,8 @@ class GridWarehouseLayout(WarehouseLayout):
                  park_cells: Optional[int] = WS_PARK_CELLS,
                  collisions: bool = True,
                  traffic: str = GRID_TRAFFIC,
-                 motion: str = GRID_MOTION):
+                 motion: str = GRID_MOTION,
+                 scenario=None):
         """
         입력:
             seed: SKU 배치용 난수 시드
@@ -78,12 +79,14 @@ class GridWarehouseLayout(WarehouseLayout):
             collisions: False이면 로봇끼리 셀 점유를 무시한다 (회귀 검증용, motion="reactive"에서만)
             traffic: "free" (모든 방향) 또는 "lanes" (일방통행 통로 + 차선 교차통로)
             motion: "reserve" (배정 시 시공간 경로 예약) 또는 "reactive" (막히면 대기/우회)
+            scenario: scenario.Scenario (도착/수요/저장/처리 시간 분포)
         """
         assert traffic in ("free", "lanes"), traffic
         assert motion in ("reserve", "reactive"), motion
         super().__init__(seed=seed, num_robots=num_robots,
                          robot_capacity=robot_capacity,
-                         num_workstations=num_workstations)
+                         num_workstations=num_workstations,
+                         scenario=scenario)
         self.collisions = collisions or motion == "reserve"
         self.traffic    = traffic
         self.motion     = motion
@@ -107,6 +110,9 @@ class GridWarehouseLayout(WarehouseLayout):
         self.out_nbrs:   List[List[int]]  = g["out"]
         self._D:         np.ndarray       = g["dist"]
         self._h_cache:   Dict[Cell, List[int]] = g.setdefault("h_cache", {})
+
+        if self.scenario.storage == "class_based":
+            self.apply_class_storage()
 
         # 주차 칸: 도킹 셀에서 가까운 순
         self.spots_by_dist = [

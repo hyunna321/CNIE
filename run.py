@@ -13,13 +13,17 @@
       --traffic free|lanes     모든 방향 이동 / 일방통행 통로 + 차선 교차통로 (기본 free)
       --motion reserve|reactive 배정 시 시공간 경로 예약 / 막히면 대기·우회 (기본 reserve)
       --no-collisions           reactive에서 로봇 간 점유를 무시 (회귀 검증용)
+    --scenario 로 주문 도착/SKU 수요/저장/처리 시간 분포를 JSON 문자열이나 파일로 준다 (scenario.Scenario 필드).
+      예: --scenario '{"arrival": "batch", "batch_mean": 6, "sku_dist": "abc", "storage": "class_based"}'
 """
 import argparse
+import json
 import os
 from typing import Dict, Iterable, List, Optional
 
 from environment import WarehouseLayout
 from grid import GridWarehouseLayout
+from scenario import Scenario
 from agents import DQNAgent
 from metrics import MetricsStore, TrainingCurveStore, print_comparison
 from training import train, evaluate_all
@@ -37,6 +41,8 @@ from constant import (
 GRID_MODE       = False
 GRID_COLLISIONS = True
 GRID_OPTS       = {"traffic": GRID_TRAFFIC, "motion": GRID_MOTION}
+SCENARIO        = Scenario()
+
 
 
 def make_layout(num_robots: int = NUM_ROBOTS,
@@ -52,8 +58,8 @@ def make_layout(num_robots: int = NUM_ROBOTS,
     kw = {} if num_workstations is None else {"num_workstations": num_workstations}
     if GRID_MODE:
         return GridWarehouseLayout(seed=DEFAULT_SEED, num_robots=num_robots,
-                                   collisions=GRID_COLLISIONS, **GRID_OPTS, **kw)
-    return WarehouseLayout(seed=DEFAULT_SEED, **kw)
+                                   collisions=GRID_COLLISIONS, scenario=SCENARIO, **GRID_OPTS, **kw)
+    return WarehouseLayout(seed=DEFAULT_SEED, scenario=SCENARIO, **kw)
 
 
 # λ 그리드 실험
@@ -304,17 +310,33 @@ def main():
                         help="그리드 충돌 처리: 시공간 경로 예약(reserve) / 막히면 대기·우회(reactive)")
     parser.add_argument("--no-collisions", action="store_true",
                         help="reactive에서 로봇 간 셀 점유를 무시 (회귀 검증용)")
+    parser.add_argument("--scenario", default=None,
+                        help="시나리오 JSON 문자열 또는 JSON 파일 경로 (scenario.Scenario 필드)")
     args = parser.parse_args()
 
-    global GRID_MODE, GRID_COLLISIONS
+    global GRID_MODE, GRID_COLLISIONS, SCENARIO
+    if args.scenario:
+        text = open(args.scenario).read() if os.path.isfile(args.scenario) else args.scenario
+        SCENARIO = Scenario(**json.loads(text))
     GRID_MODE       = args.grid
     GRID_COLLISIONS = not args.no_collisions
     GRID_OPTS.update(traffic=args.traffic, motion=args.motion)
     suffix = ""
     if GRID_MODE:
         suffix = f"_grid_{args.traffic}_{args.motion}" + ("" if GRID_COLLISIONS else "_nocoll")
+    if not SCENARIO.is_default:
+        import hashlib
+        tag = hashlib.sha1(json.dumps(SCENARIO.to_dict(), sort_keys=True).encode()).hexdigest()[:6]
+        suffix += f"_sc{tag}"
+        print(f"시나리오 {tag}: {SCENARIO.to_dict()}")
+
     out_dir = OUT_DIR + suffix
     exp_dir = EXPERIMENT_OUT_DIR + suffix
+    if not SCENARIO.is_default:
+        for d in (out_dir, exp_dir):
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "scenario.json"), "w") as f:
+                json.dump(SCENARIO.to_dict(), f, indent=1, ensure_ascii=False)
 
     if args.experiment in ("lambda-grid", "all"):
         run_lambda_grid(args.episodes, args.n_eval, out_dir=out_dir)
