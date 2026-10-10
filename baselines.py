@@ -57,6 +57,8 @@ class BufferSimulator(SimulatorBase):
         orders = self.order_mgr.dequeue_up_to(self.robot_capacity)
         if orders:
             self._robot_orders[robot.id] = list(orders)
+            for o in orders:
+                self._record_service_start(o, self.now)
             robot.idle_slots = self.robot_capacity - len(orders)
             if len(orders) >= self.depart_k:
                 robot.assign_trip([o.loc for o in orders], self.layout)
