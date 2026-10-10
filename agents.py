@@ -5,7 +5,7 @@ import torch.optim as optim
 import random
 import warnings
 from collections import deque
-from typing import List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 
 from environment import WarehouseLayout, Robot, nearest_workstation
 from constant import (
@@ -421,11 +421,12 @@ class DQNAgent:
         self.beta    = min(self.beta_end,
                            self.beta + (self.beta_end - PER_BETA_START) / total_episodes)
 
-    def save(self, path: str):
+    def save(self, path: str, meta: Optional[Dict] = None):
         """네트워크 가중치와 학습 상태를 체크포인트로 저장한다.
 
         입력:
             path: 저장 경로
+            meta: 학습 조건 기록 (λ, 레이아웃/이동 모드, 시나리오 등). 시각화 도구가 읽는다.
         """
         torch.save({
             "policy_state": self.policy_net.state_dict(),
@@ -436,6 +437,8 @@ class DQNAgent:
             "robot_capacity": self.robot_capacity,
             "num_robots":      self.num_robots,
             "num_workstations": self.num_workstations,
+            "sim_time":        self.sim_time,
+            "meta":            meta or {},
         }, path)
 
     def load(self, path: str):

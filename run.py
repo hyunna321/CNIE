@@ -15,6 +15,7 @@
       --no-collisions           reactive에서 로봇 간 점유를 무시 (회귀 검증용)
     --scenario 로 주문 도착/SKU 수요/저장/처리 시간 분포를 JSON 문자열이나 파일로 준다 (scenario.Scenario 필드).
       예: --scenario '{"arrival": "batch", "batch_mean": 6, "sku_dist": "abc", "storage": "class_based"}'
+    학습한 에이전트는 결과 폴더에 agent_*.pt 체크포인트로 저장된다 (시각화 도구에서 불러올 수 있다).
 """
 import argparse
 import json
@@ -43,6 +44,17 @@ GRID_COLLISIONS = True
 GRID_OPTS       = {"traffic": GRID_TRAFFIC, "motion": GRID_MOTION}
 SCENARIO        = Scenario()
 
+
+def checkpoint_meta(lam: float, num_robots: int, num_workstations: int,
+                    total_episodes: int) -> dict:
+    """체크포인트에 함께 저장할 학습 조건."""
+    return {
+        "lam": lam, "num_robots": num_robots, "num_workstations": num_workstations,
+        "robot_capacity": ROBOT_CAPACITY, "episodes": total_episodes,
+        "grid": GRID_MODE, "traffic": GRID_OPTS["traffic"] if GRID_MODE else None,
+        "motion": GRID_OPTS["motion"] if GRID_MODE else None,
+        "scenario": SCENARIO.to_dict(),
+    }
 
 
 def make_layout(num_robots: int = NUM_ROBOTS,
@@ -119,6 +131,8 @@ def experiment_lambda_grid(
               label=f"RL_lam{lam_hr}_train",
               curve_store=curve_store)
         tr_store.save_csv(os.path.join(out_dir, f"train_lam{lam_hr}_M{num_robots}.csv"))
+        agent.save(os.path.join(out_dir, f"agent_lam{lam_hr}_M{num_robots}.pt"),
+                   checkpoint_meta(lam, num_robots, layout.num_workstations, total_episodes))
         agents[lam] = agent
 
         ev_store = MetricsStore()
@@ -225,6 +239,8 @@ def run_setting(experiment_name: str, num_robots: int, num_workstations: int,
     )
     train_store.save_csv(os.path.join(setting_dir, "train.csv"))
     curve_store.save_csv(os.path.join(setting_dir, "training_curve.csv"))
+    agent.save(os.path.join(setting_dir, "agent.pt"),
+               checkpoint_meta(EXPERIMENT_LAMBDA, num_robots, num_workstations, total_episodes))
 
     eval_store = MetricsStore()
     eval_seeds = list(range(EVAL_SEED_BASE, EVAL_SEED_BASE + n_eval))
