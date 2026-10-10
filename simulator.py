@@ -353,6 +353,8 @@ class SimulatorBase:
         self._n_plans:               int                    = 0
         self._n_plan_fail:           int                    = 0
         self._plan_time:             float                  = 0.0
+        # 시각화 기록기 (viewer.recorder.Recorder). None이면 기록하지 않는다.
+        self.recorder = None
 
     def _build_robots(self) -> List[Robot]:
         """로봇을 생성하고 워크스테이션에 라운드로빈으로 초기 배치한다.
@@ -406,6 +408,8 @@ class SimulatorBase:
                     self._res.set_rest(r.id, self.layout.cell_index[r.pos], 0)
         t0, n0 = self.order_mgr.next_arrival(0.0)
         self.eq.push(Event(t0, EVENT_ORDER_ARRIVAL, {"count": n0}))
+        if self.recorder is not None:
+            self.recorder.on_reset(self)
 
     def run(self):
         """sim_time까지 사건을 시각 순으로 처리한다."""
@@ -719,6 +723,8 @@ class SimulatorBase:
                     self._reserve_tick(k)
                 else:
                     self._grid_tick()
+                if self.recorder is not None:
+                    self.recorder.on_tick(self, k)
                 k += 1
         self._advance_clock(self.sim_time)
 
@@ -1030,6 +1036,8 @@ class SimulatorBase:
 
         if ok:
             tab.commit(r.id, t0, idx[r.pos], cells, idx[spot])
+            if self.recorder is not None:
+                self.recorder.on_plan(self, r, t0, cells)
             r.plan = deque((t0 + 1 + i, L.cells[c]) for i, c in enumerate(cells))
             r.park_spot = spot
             self._spots_taken.add(spot)
@@ -1173,6 +1181,8 @@ class RLSimulator(SimulatorBase):
 
         robot       = eligible[idx]
         chosen_feat = cand_feats[idx]
+        if self.recorder is not None:
+            self.recorder.on_rl_decision(self, order, eligible, cand_feats, idx, target_coords)
 
         # 배정 전 상태 기준으로 detour를 측정한다 (보상 및 extra_travel 집계용).
         delta_d = self._insertion_delta(robot, order.loc, target_coords)
