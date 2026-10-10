@@ -15,22 +15,26 @@ from constant import (
     MAX_CANDIDATES, MAX_CANDIDATES_MARGIN,
     PER_ALPHA, PER_BETA_START, PER_BETA_END, PER_PRIORITY_EPS,
     QUEUE_NORM_FALLBACK, DELTA_NORM_CLIP,
-    TOTAL_EPISODES,
+    TOTAL_EPISODES, ROBOT_SPEED, SMDP_COST_DIST,
 )
 
+FEATURE_SETS = ("base", "bl6")
+BL6_EXTRA_DIM = 5   # feature_set="bl6"일 때 추가되는 특징 수
 
-def candidate_feature_dim(robot_capacity: int) -> int:
+
+def candidate_feature_dim(robot_capacity: int, feature_set: str = "base") -> int:
     """(주문, 후보 로봇) 쌍 특징벡터의 차원.
 
     구성: 주문 상대좌표 2 + 삽입 detour 1 + 로봇 상태 (5 + capacity*2)
           + 컨텍스트 2 (큐 길이, 경과시간)
+          + (feature_set="bl6"이면) BL6 한계비용 구성요소 5
 
     입력:
         robot_capacity: 로봇 용량
     출력:
         특징 차원 수
     """
-    return 2 + 1 + (5 + robot_capacity * 2) + 2
+    return 2 + 1 + (5 + robot_capacity * 2) + 2 + (BL6_EXTRA_DIM if feature_set == "bl6" else 0)
 
 
 class RobotScoreNet(nn.Module):
@@ -215,7 +219,7 @@ class DQNAgent:
 
     def __init__(self, robot_capacity: int, seed: int = DEFAULT_SEED,
                 sim_time: float = SIM_TIME, num_robots: Optional[int] = None,
-                num_workstations: int = NUM_WORKSTATIONS):
+                num_workstations: int = NUM_WORKSTATIONS, feature_set: str = "base"):
         """
         입력:
             robot_capacity: 로봇 용량
@@ -223,12 +227,15 @@ class DQNAgent:
             sim_time: 경과시간 정규화 기준 (s)
             num_robots: 로봇 수 (최대 후보 수 결정, 로깅용)
             num_workstations: 워크스테이션 수 (로깅용)
+            feature_set: "base" (기존 특징) 또는 "bl6" (BL6 한계비용 구성요소 추가)
         """
+        assert feature_set in FEATURE_SETS, feature_set
+        self.feature_set      = feature_set
         self.robot_capacity   = robot_capacity
         self.sim_time         = sim_time
         self.num_robots       = num_robots
         self.num_workstations = num_workstations
-        self.feat_dim         = candidate_feature_dim(robot_capacity)
+        self.feat_dim         = candidate_feature_dim(robot_capacity, feature_set)
 
         if num_robots is not None:
             self.max_candidates = max(MAX_CANDIDATES, num_robots + MAX_CANDIDATES_MARGIN)
@@ -292,8 +299,33 @@ class DQNAgent:
                 order_loc, layout, target_ws_coords=end, dynamic_ws=(not r.is_idle))
             delta_norm = min(delta_ins / layout.dist_norm, DELTA_NORM_CLIP)
             robot_feat = r.state_vector(self.robot_capacity).tolist()
-            feats[i]   = order_rel + [delta_norm] + robot_feat + [queue_norm, elapsed_norm]
+            row = order_rel + [delta_norm] + robot_feat + [queue_norm, elapsed_norm]
+            if self.feature_set == "bl6":
+                row += self._bl6_features(r, order_loc, layout, delta_ins, target_coords)
+            feats[i]   = row
         return feats
+
+    def _bl6_features(self, r: Robot, order_loc, layout: WarehouseLayout,
+                      delta_ins: float, target_coords) -> List[float]:
+        """BL6(MarginalCostSimulator._marginal_cost)와 같은 식의 한계비용 구성요소를 정규화해 돌려준다.
+
+        [적재 주문 비율, 적재 주문 지연, 배정 후 남은 거리, 추가 이동거리, 한계비용 합계]
+        거리는 layout.dist_norm, 시간은 dist_norm / 속도로 나눈다.
+        """
+        onboard = self.robot_capacity - r.idle_slots
+        dist    = layout.aisle_distance
+        if r.is_idle:
+            remaining_after = dist(r.pos, order_loc) + dist(order_loc, target_coords)
+            delay_onboard   = 0.0
+            added_distance  = remaining_after
+        else:
+            remaining_after = r.remaining_distance + delta_ins
+            delay_onboard   = onboard * delta_ins / ROBOT_SPEED
+            added_distance  = delta_ins
+        mc = delay_onboard + remaining_after / ROBOT_SPEED + SMDP_COST_DIST * added_distance
+        dn, tn = layout.dist_norm, layout.dist_norm / ROBOT_SPEED
+        return [onboard / self.robot_capacity, min(delay_onboard / tn, 5.0), min(remaining_after / dn, 5.0),
+                min(added_distance / dn, 5.0), min(mc / tn, 10.0)]
 
     def _pad(self, feats: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """후보 특징을 max_candidates 길이로 0-패딩한다. 초과분은 경고 후 버린다.
@@ -438,6 +470,7 @@ class DQNAgent:
             "num_robots":      self.num_robots,
             "num_workstations": self.num_workstations,
             "sim_time":        self.sim_time,
+            "feature_set":     self.feature_set,
             "meta":            meta or {},
         }, path)
 

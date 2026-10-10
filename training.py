@@ -35,7 +35,8 @@ def train(layout:         WarehouseLayout,
           verbose_every:  int   = VERBOSE_EVERY,
           curve_store:    Optional["TrainingCurveStore"] = None,
           reward_mode:    str   = REWARD_MODE_DEFAULT,
-          updates_per_episode: int = 1) -> None:
+          updates_per_episode: int = 1,
+          update_ratio:   Optional[float] = None) -> None:
     """RL 에이전트를 학습한다.
 
     앞쪽 절반 에피소드는 λ를 [lam × CURRICULUM_LAM_MARGIN, lam]에서 무작위로
@@ -57,6 +58,8 @@ def train(layout:         WarehouseLayout,
         curve_store: 학습 곡선 기록용 TrainingCurveStore (선택)
         reward_mode: "legacy" 또는 "smdp" (RLSimulator 참고)
         updates_per_episode: 에피소드마다 수행할 train_step 횟수
+        update_ratio: 주어지면 updates_per_episode 대신 (그 에피소드의 전이 수 / update_ratio)회 업데이트한다
+                      (예: 8이면 결정 8개당 1회)
     """
     reward_cfg = reward_cfg or {}
     lam_lo, lam_hi = lam * CURRICULUM_LAM_MARGIN, lam
@@ -79,7 +82,9 @@ def train(layout:         WarehouseLayout,
         for trans in transitions:
             agent.push(*trans)
         loss = None
-        for _ in range(updates_per_episode):
+        n_updates = (updates_per_episode if update_ratio is None
+                     else max(1, int(len(transitions) / update_ratio)))
+        for _ in range(n_updates):
             step_loss = agent.train_step()
             if step_loss is not None:
                 loss = step_loss
