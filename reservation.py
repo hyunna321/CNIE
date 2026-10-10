@@ -61,9 +61,15 @@ class ReservationTable:
 
     # 갱신
 
-    def commit(self, rid: int, t0: int, cells: List[int], rest_cell: int):
-        """rid의 경로(틱 t0+1부터 cells 순서)와 그 뒤 rest_cell 무기한 점유를 예약한다."""
+    def commit(self, rid: int, t0: int, start: int, cells: List[int], rest_cell: int):
+        """rid의 경로(틱 t0+1부터 cells 순서)와 그 뒤 rest_cell 무기한 점유를 예약한다.
+
+        틱 t0의 출발 셀도 함께 기록한다. 이전 계획이 무기한 점유(rest)로 끝나 있었다면 그 기록은
+        지워졌으므로, 이 기록이 없으면 다음에 계획하는 로봇이 t0 위치를 몰라 맞바꾸기를 못 막는다.
+        """
         lst = self.robot_res.setdefault(rid, [])
+        self.cell_res.setdefault(start, {})[t0] = rid
+        lst.append((start, t0))
         for i, c in enumerate(cells):
             t = t0 + 1 + i
             self.cell_res.setdefault(c, {})[t] = rid

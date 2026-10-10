@@ -849,7 +849,7 @@ class SimulatorBase:
         if r.arrive_at_node():
             self._schedule_next(r)
             return
-        if self.reserve and r.pending_insert:
+        if self.reserve and r.pending_insert and r.pos == r.workstation:
             # 삽입 계획이 실패한 채 복귀 도킹 셀에 왔으면, 내리지 않고 대기 주문을 경로에 넣어 다시 나간다
             # (연속 모드에서 복귀 중 삽입된 주문을 처리하는 방식과 같다).
             locs, r.pending_insert = r.pending_insert, []
@@ -990,7 +990,7 @@ class SimulatorBase:
                     break
 
         if ok:
-            tab.commit(r.id, t0, cells, idx[spot])
+            tab.commit(r.id, t0, idx[r.pos], cells, idx[spot])
             r.plan = deque((t0 + 1 + i, L.cells[c]) for i, c in enumerate(cells))
             r.park_spot = spot
             self._spots_taken.add(spot)
