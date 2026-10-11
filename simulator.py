@@ -132,8 +132,6 @@ class OrderManager:
     def next_arrival(self, current_time: float) -> Tuple[float, int]:
         """다음 주문 도착 시각과 그때 들어오는 주문 수 (묶음 도착이 아니면 1).
 
-        기본 포아송이면 기존처럼 self._rng의 지수분포 간격을 쓴다.
-
         입력:
             current_time: 현재 시각 (s)
         출력:
@@ -598,7 +596,7 @@ class SimulatorBase:
         if robot.current_dest is None:
             return
         if self.reserve:
-            # 경로가 바뀐 경우에만 트립 전체를 다시 계획한다 (경유지 도착 등 계획대로 진행되는 사건은 그대로).
+            # 경로가 바뀐 경우에만 트립 전체를 다시 계획한다.
             if robot.route_version != robot.plan_version:
                 self._reserve_plan(robot)
             robot.start_travel(self.now)
@@ -840,8 +838,7 @@ class SimulatorBase:
         """피킹/워크스테이션 처리 타이머를 한 틱 줄이고, 끝난 로봇의 다음 단계를 처리한다.
 
         출력:
-            이번 틱에 타이머가 끝난 로봇 id 집합. 이 로봇들은 이번 틱에는 움직이지 않으므로,
-            머무는 시간 T초는 도착 틱 + T틱 동안 셀을 점유하는 것이 된다.
+            이번 틱에 타이머가 끝난 로봇 id 집합 (이번 틱에는 움직이지 않는다)
         """
         dt   = self.layout.tick
         done = set()
@@ -859,7 +856,7 @@ class SimulatorBase:
         return done
 
     def _grid_next_pick(self, r: Robot, loc, skip: int = 0) -> Optional[Order]:
-        """r이 loc에서 아직 집지 않은 주문 중 (skip+1)번째 (배정 순서). 피킹 시간의 단일 기준이다."""
+        """r이 loc에서 아직 집지 않은 주문 중 배정 순서로 (skip+1)번째."""
         for o in self._robot_orders[r.id]:
             if not o.picked and o.loc == loc:
                 if skip == 0:
@@ -868,7 +865,7 @@ class SimulatorBase:
         return None
 
     def _grid_ticks(self, seconds: float) -> int:
-        """머무는 시간(s)을 틱 수로 올림한다 (타이머가 끝나는 틱과 같다)."""
+        """머무는 시간(s)을 틱 수로 올림한다."""
         return int(math.ceil(seconds / self.layout.tick - 1e-9)) if seconds > 0.0 else 0
 
     def _grid_on_arrive(self, r: Robot):
@@ -892,8 +889,7 @@ class SimulatorBase:
             self._schedule_next(r)
             return
         if self.reserve and r.pending_insert and r.pos == r.workstation:
-            # 삽입 계획이 실패한 채 복귀 도킹 셀에 왔으면, 내리지 않고 대기 주문을 경로에 넣어 다시 나간다
-            # (연속 모드에서 복귀 중 삽입된 주문을 처리하는 방식과 같다).
+            # 삽입 계획에 실패한 채 도킹 셀에 오면 내리지 않고 대기 주문을 경로에 넣어 다시 나간다
             locs, r.pending_insert = r.pending_insert, []
             slots = r.idle_slots
             for loc in locs:
@@ -964,8 +960,8 @@ class SimulatorBase:
 
         경로: (피킹 중이면 남은 피킹 시간만큼 대기) -> current_dest -> 남은 경유지 (NNH 순서)
               -> 복귀 도킹 셀 (처리 시간만큼 머묾) -> 빈 주차 칸 (무기한 머묾).
-        계획 시작 틱은 self._t0_ctx이고, 그 이후의 기존 예약은 지우고 다시 짠다.
-        실패하면 기존 예약을 되살리고 replan_pending으로 표시해 다음 틱에 다시 시도한다.
+        계획 시작 틱(self._t0_ctx) 이후 예약은 지우고 다시 짠다.
+        실패하면 지운 예약을 되살리고 replan_pending으로 표시해 다음 틱에 다시 시도한다.
         """
         L, tab = self.layout, self._res
         t0 = self._t0_ctx
@@ -976,9 +972,7 @@ class SimulatorBase:
         old_spot = r.park_spot
         self._spots_taken.discard(old_spot)
 
-        # 방문 목록 [(셀, 머무는 틱)]. 피킹 시간은 그 셀에서 아직 집지 않은 주문을 배정 순서대로
-        # 쓴다 (_grid_on_arrive와 같은 기준). 같은 셀 연속 방문(같은 위치 주문 여러 건)은 한 번
-        # 방문해 각 주문의 피킹 시간을 합한 만큼 머문다 (시뮬레이터도 도착 즉시 다음 피킹을 시작한다).
+        # 방문 목록 [(셀, 머무는 틱)]. 같은 셀을 연달아 방문하면 한 번 들러 피킹 시간 합만큼 머문다.
         stay0 = 0
         visits = []
         if r.timer_kind == "pick":
@@ -1058,7 +1052,7 @@ class SimulatorBase:
         """이동 중인 r의 경로에 locs를 삽입하고 다시 계획한다.
 
         계획에 실패하면 경로 변경을 되돌리고 locs를 삽입 대기(pending_insert)로 둔다.
-        이렇게 하면 r은 기존 계획과 일치하는 경로로 계속 움직이고, 다음 틱에 다시 시도한다.
+        r은 이전 계획대로 계속 움직이고 다음 틱에 다시 시도한다.
         빈 슬롯 수는 배정 시점에 이미 줄여 두므로 되돌리지 않는다.
         """
         snap = (list(r.route), r.workstation, r.workstation_id, r.idle_slots, r.route_version)

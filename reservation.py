@@ -62,11 +62,7 @@ class ReservationTable:
     # 갱신
 
     def commit(self, rid: int, t0: int, start: int, cells: List[int], rest_cell: int):
-        """rid의 경로(틱 t0+1부터 cells 순서)와 그 뒤 rest_cell 무기한 점유를 예약한다.
-
-        틱 t0의 출발 셀도 함께 기록한다. 이전 계획이 무기한 점유(rest)로 끝나 있었다면 그 기록은
-        지워졌으므로, 이 기록이 없으면 다음에 계획하는 로봇이 t0 위치를 몰라 맞바꾸기를 못 막는다.
-        """
+        """rid의 출발 셀(틱 t0), 경로(틱 t0+1부터 cells 순서), 그 뒤 rest_cell 무기한 점유를 예약한다."""
         lst = self.robot_res.setdefault(rid, [])
         self.cell_res.setdefault(start, {})[t0] = rid
         lst.append((start, t0))
@@ -150,8 +146,8 @@ def plan_leg(table: ReservationTable, out_nbrs: List[List[int]], h: List[int],
     상태를 (셀, 그 셀이 비어 있는 시간 구간)으로 잡아, 기다림이 길어도 상태 수가 늘지 않는다.
     각 상태에는 가장 이른 도착 틱을 기록하고, 이동 시 다음 셀의 안전 구간에 맞춰 출발 셀에서
     기다린다. goal에 도착한 틱 ta부터 ta + dwell까지 goal에 머물 수 있어야 하고, final이면
-    도착 이후 무기한 머물 수 있어야 한다. 경로는 도중에 goal을 지나가지 않는다
-    (시뮬레이터는 로봇이 current_dest 셀에 들어서는 순간을 도착으로 처리하므로).
+    도착 이후 무기한 머물 수 있어야 한다. 셀에 들어서는 순간이 도착이므로 경로는 도중에
+    goal을 지나지 않는다.
 
     입력:
         table: 예약표
@@ -167,7 +163,7 @@ def plan_leg(table: ReservationTable, out_nbrs: List[List[int]], h: List[int],
     """
     if start == goal:
         if not _can_stay(table, rid, goal, t0, dwell, final):
-            return None                             # 이미 도착한 셀에서 머물 수 없으면 다음 틱에 재시도
+            return None
         return [goal] * dwell, t0 + dwell
     t_max = t0 + h[start] + RESERVE_HORIZON_EXTRA
     ivs: Dict[int, List[Tuple[int, float]]] = {}

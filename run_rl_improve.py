@@ -1,7 +1,6 @@
-"""RL 개선 실험: 학습량(업데이트 비율)과 BL6 한계비용 특징의 효과를 BL6와 비교한다.
+"""RL 개선 실험: 업데이트 비율과 BL6 한계비용 특징의 효과를 BL6와 비교한다.
 
-arm 하나(학습 방식)와 환경 하나를 받아 학습/평가하고 저장한다. arm·환경·시드별로
-별도 프로세스로 병렬 실행하는 것을 전제로 한다.
+arm, 환경, 시드 하나를 학습/평가해 저장한다. 조합마다 프로세스를 따로 띄워 병렬로 돌린다.
 
 사용법:
     python run_rl_improve.py --env grid --arm smdp_r8_bl6 --seed 42
@@ -9,15 +8,15 @@ arm 하나(학습 방식)와 환경 하나를 받아 학습/평가하고 저장�
     python run_rl_improve.py --summarize
 
 arm:
-    smdp_u1_base   : SMDP 보상, 에피소드당 업데이트 1회, 기존 특징 (기존 기본 설정)
-    smdp_r8_base   : SMDP 보상, 결정 8개당 업데이트 1회, 기존 특징
+    smdp_u1_base   : SMDP 보상, 에피소드당 업데이트 1회, 기본 특징 (run.py 기본값)
+    smdp_r8_base   : SMDP 보상, 결정 8개당 업데이트 1회, 기본 특징
     smdp_r8_bl6    : SMDP 보상, 결정 8개당 업데이트 1회, BL6 한계비용 특징 추가
-    legacy_r8_base : legacy 보상, 결정 8개당 업데이트 1회, 기존 특징
+    legacy_r8_base : legacy 보상, 결정 8개당 업데이트 1회, 기본 특징
     legacy_r8_bl6  : legacy 보상, 결정 8개당 업데이트 1회, BL6 특징 추가
     baselines      : BL6, BL4, Greedy-R만 평가
 
 env:
-    cont : 연속 레이아웃 (기존 실험과 같은 모델)
+    cont : 연속 레이아웃
     grid : 그리드 free + reserve (기본 시나리오)
 
 저장: logs_rl_improve/{env}_M{M}_lam{λ}/{arm}_s{seed}/ (train.csv, curve.csv, eval.csv, agent.pt)

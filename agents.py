@@ -227,7 +227,7 @@ class DQNAgent:
             sim_time: 경과시간 정규화 기준 (s)
             num_robots: 로봇 수 (최대 후보 수 결정, 로깅용)
             num_workstations: 워크스테이션 수 (로깅용)
-            feature_set: "base" (기존 특징) 또는 "bl6" (BL6 한계비용 구성요소 추가)
+            feature_set: "base" 또는 "bl6" (BL6 한계비용 구성요소 5개 추가)
         """
         assert feature_set in FEATURE_SETS, feature_set
         self.feature_set      = feature_set

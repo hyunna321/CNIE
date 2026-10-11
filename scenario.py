@@ -1,12 +1,10 @@
-"""시나리오 설정: 주문 도착 과정, SKU 수요 분포, 저장 위치 배정, 피킹/워크스테이션 처리 시간 분포.
+"""주문 도착 과정, SKU 수요, 저장 위치, 피킹/워크스테이션 처리 시간 분포 설정.
 
-기본값(Scenario())은 기존 모델과 같다: 포아송 도착, 균등 SKU 수요, 무작위 저장,
-고정 피킹/처리 시간(constant.PICK_TIME, WS_PROC_TIME). 기본값일 때 주문 난수 소비 순서도
-기존과 같아서, 같은 시드면 기존과 같은 주문열이 나온다. 기본값이 아닌 분포가 쓰는 추가 난수는
-별도 생성기(arrival_rng, time_rng)에서 뽑으므로, 예를 들어 도착 과정만 바꿔도 SKU/위치
-순서는 그대로 유지된다.
+Scenario() 기본값: 포아송 도착, 균등 SKU 수요, 무작위 저장, 고정 피킹/처리 시간
+(constant.PICK_TIME, WS_PROC_TIME). SKU/위치와 포아송 도착 간격은 OrderManager._rng에서,
+그 밖의 도착 과정과 처리 시간은 별도 생성기(arrival_rng, time_rng)에서 뽑는다.
 
-참고 문헌 (모형 형태의 출처이며, 파라미터 값은 사용자가 정한다):
+참고 문헌:
   - ABC 수요 곡선 G(x) = x^s: Hausman, Schwarz & Graves (1976), Management Science 22(6).
   - 클래스 기반 저장(인기 SKU를 출고 지점 가까이): 같은 논문의 class-based storage.
   - 로봇 창고(RMFS) 대기행렬 모형의 포아송 주문 도착: Lamballais, Roy & De Koster (2017), EJOR.
@@ -77,7 +75,7 @@ class Scenario:
 class OrderStream:
     """시나리오에 따라 주문 도착 시각/묶음 크기, SKU, 처리 시간을 뽑는다.
 
-    order_rng: SKU/위치 및 기본 포아송 도착 간격 (기존 OrderManager._rng와 같은 순서로 사용)
+    order_rng: SKU/위치, 포아송 도착 간격 (OrderManager._rng)
     arrival_rng: 포아송이 아닌 도착 과정의 난수
     time_rng: 확률적 피킹/처리 시간의 난수
     """

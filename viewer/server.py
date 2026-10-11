@@ -4,9 +4,8 @@
     python -m viewer.server            # http://127.0.0.1:8765 를 브라우저로 연다
     python -m viewer.server --port 9000
 
-설정 화면에서 배정 정책, 로봇/워크스테이션 수, 도착/수요/저장/처리 시간 분포를 고르고 실행하면,
-시뮬레이션을 끝까지 돌린 뒤 브라우저에서 재생한다. "Export replay"는 그 실행을 파이썬 없이
-열 수 있는 HTML 파일 하나로 내려받는다 (팀원 공유용).
+/api/run은 시뮬레이션을 끝까지 돌린 기록을 돌려주고, 재생은 브라우저에서 한다.
+/api/export는 실행 하나를 단독 HTML 파일로 내려준다.
 """
 import argparse
 import json

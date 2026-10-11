@@ -1,7 +1,7 @@
 """그리드 시뮬레이션 기록기: 매 틱 로봇 위치/상태, 경로·예약 변경, 주문 수명, 지표, 혼잡 히트맵, RL 결정.
 
 SimulatorBase.recorder에 붙이면 시뮬레이터가 on_reset / on_tick / on_plan / on_rl_decision을 부른다.
-그리드 모드 전용이다 (연속 모드는 이동 중 위치가 없다).
+그리드 모드 전용.
 """
 import base64
 from collections import deque
