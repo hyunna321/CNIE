@@ -1,4 +1,4 @@
-"""RL 에이전트 학습, RL·베이스라인 공통 평가, 부하(λ) 민감도 분석."""
+"""RL 에이전트 학습, RL·베이스라인 공통 평가, 부하(λ) 민감도 분석"""
 import csv
 import os
 import random
@@ -35,12 +35,13 @@ def train(layout:         WarehouseLayout,
           verbose_every:  int   = VERBOSE_EVERY,
           curve_store:    Optional["TrainingCurveStore"] = None,
           reward_mode:    str   = REWARD_MODE_DEFAULT,
-          updates_per_episode: int = 1) -> None:
-    """RL 에이전트를 학습한다.
+          updates_per_episode: int = 1,
+          update_ratio:   Optional[float] = None) -> None:
+    """RL 에이전트 학습
 
-    앞쪽 절반 에피소드는 λ를 [lam × CURRICULUM_LAM_MARGIN, lam]에서 무작위로
-    뽑는 커리큘럼으로, 나머지는 lam으로 학습한다. 에피소드마다 전이를
-    버퍼에 넣고 train_step을 1회 수행한다.
+    - 앞쪽 절반 에피소드: λ를 [lam × CURRICULUM_LAM_MARGIN, lam]에서 무작위로 뽑는 커리큘럼
+    - 나머지: lam으로 학습
+    - 에피소드마다 전이를 버퍼에 넣고 train_step 1회 수행
 
     입력:
         layout: WarehouseLayout
@@ -57,6 +58,8 @@ def train(layout:         WarehouseLayout,
         curve_store: 학습 곡선 기록용 TrainingCurveStore (선택)
         reward_mode: "legacy" 또는 "smdp" (RLSimulator 참고)
         updates_per_episode: 에피소드마다 수행할 train_step 횟수
+        update_ratio: 주어지면 updates_per_episode 대신 (그 에피소드의 전이 수 / update_ratio)회 업데이트
+                      (예: 8이면 결정 8개당 1회)
     """
     reward_cfg = reward_cfg or {}
     lam_lo, lam_hi = lam * CURRICULUM_LAM_MARGIN, lam
@@ -79,14 +82,16 @@ def train(layout:         WarehouseLayout,
         for trans in transitions:
             agent.push(*trans)
         loss = None
-        for _ in range(updates_per_episode):
+        n_updates = (updates_per_episode if update_ratio is None
+                     else max(1, int(len(transitions) / update_ratio)))
+        for _ in range(n_updates):
             step_loss = agent.train_step()
             if step_loss is not None:
                 loss = step_loss
         agent.decay_epsilon(total_episodes)
 
         # 누적 보상은 완료 주문 수에 비례해 커지므로, λ/K 설정 간 비교가
-        # 가능하도록 완료 주문 1건당 평균으로 기록한다.
+        # 가능하도록 완료 주문 1건당 평균으로 기록
         n_done     = max(1, rl_sim.order_mgr.completed_count())
         avg_reward = rl_sim.total_reward / n_done
 
@@ -130,7 +135,7 @@ def evaluate_all(layout:         WarehouseLayout,
                  rl_label:       str = "RL",
                  reward_mode:    str = REWARD_MODE_DEFAULT,
                  include_baselines: bool = True) -> None:
-    """같은 평가 시드로 RL(ε=0)과 BL1~BL6을 모두 실행해 결과를 기록한다.
+    """같은 평가 시드로 RL(ε=0)과 BL1~BL6을 모두 실행해 결과 기록
 
     입력:
         layout: WarehouseLayout
@@ -206,11 +211,11 @@ def evaluate_all(layout:         WarehouseLayout,
 #
 # 시스템이 포화되면 정책과 무관하게 처리량이 이동 capacity로 수렴하므로,
 # 여러 λ에서 로봇 가동률과 RL 대비 베이스라인의 대응표본 t-검정 결과를 보고
-# RL이 유의하게 나은 부하 구간을 찾는다.
+# RL이 유의하게 나은 부하 구간 탐색
 
 def _robot_utilization(store: MetricsStore, label: str, lam: float,
                        num_robots: int) -> float:
-    """로봇 가동률 = 평균 총 이동거리 / (num_robots · 속도 · SIM_TIME).
+    """로봇 가동률 = 평균 총 이동거리 / (num_robots · 속도 · SIM_TIME)
 
     입력:
         store: 결과 저장소
@@ -229,7 +234,7 @@ def _robot_utilization(store: MetricsStore, label: str, lam: float,
 
 
 def _paired_ttest(a: List[float], b: List[float]) -> Tuple[float, float]:
-    """대응표본 t-검정. scipy가 없으면 정규근사로 p-value를 계산한다.
+    """대응표본 t-검정 (scipy가 없으면 정규근사로 p-value 계산)
 
     입력:
         a, b: 같은 시드 순서로 짝지어진 두 표본
@@ -257,7 +262,7 @@ def _paired_ttest(a: List[float], b: List[float]) -> Tuple[float, float]:
 
 
 def _print_advantage_summary(rows: List[Dict], baseline_labels: List[str]) -> None:
-    """λ별로 RL이 대기시간에서 유의하게(p < 0.05) 앞선 베이스라인 수를 출력한다.
+    """λ별로 RL이 대기시간에서 유의하게(p < 0.05) 앞선 베이스라인 수 출력
 
     입력:
         rows: analyze_load_sensitivity의 λ별 요약 행
@@ -289,10 +294,10 @@ def analyze_load_sensitivity(
     seed_base:      int = LOAD_SWEEP_SEED_BASE,
     out_csv:        Optional[str] = None,
 ) -> MetricsStore:
-    """학습된 에이전트를 여러 λ에서 평가해 RL이 베이스라인보다 나은 부하 구간을 찾는다.
+    """학습된 에이전트를 여러 λ에서 평가해 RL이 베이스라인보다 나은 부하 구간 탐색
 
-    λ마다 로봇 가동률과, RL 대비 각 베이스라인의 대기시간/완료율 대응표본
-    t-검정 결과를 계산한다.
+    λ마다 로봇 가동률과 RL 대비 각 베이스라인의 대기시간/완료율 대응표본
+    t-검정 결과 계산
 
     입력:
         layout: WarehouseLayout

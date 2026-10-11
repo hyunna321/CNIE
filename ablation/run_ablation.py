@@ -1,17 +1,17 @@
-"""멀티 워크스테이션 복귀와 최근접 이웃(NNH) 경로 구성의 기여도를 보는 대응 어블레이션.
+"""멀티 워크스테이션 복귀와 최근접 이웃(NNH) 경로 구성의 기여도를 보는 대응 어블레이션
 
 비교 조건
 --------
 RL-MultiStation-NNH
-    기본 정책. 복귀 워크스테이션을 동적으로 고르고, NNH로 경로를 구성/재구성한다.
+    기본 정책. 복귀 워크스테이션 동적 선택, NNH로 경로 구성/재구성
 RL-NoNNH
-    멀티 워크스테이션은 유지하되 배정 순서(FIFO)대로 방문한다. mid-trip 주문은
-    남은 경로 끝에 붙이고 재정렬하지 않는다.
+    멀티 워크스테이션은 유지, 배정 순서(FIFO)대로 방문. mid-trip 주문은
+    남은 경로 끝에 붙이고 재정렬 안 함
 RL-SingleStation-NNH
-    NNH는 유지하되 모든 트립이 가운데 워크스테이션으로 복귀한다.
+    NNH는 유지, 모든 트립이 가운데 워크스테이션으로 복귀
 
-모든 조건은 같은 학습 에피소드 시드, 커리큘럼, 평가 시드를 쓰며,
-각각 새로 시드를 고정한 에이전트로 학습한다.
+모든 조건이 같은 학습 에피소드 시드, 커리큘럼, 평가 시드 사용
+각각 새로 시드를 고정한 에이전트로 학습
 """
 
 import argparse
@@ -49,7 +49,7 @@ from constant import (
 
 @dataclass(frozen=True)
 class AblationSpec:
-    """어블레이션 조건 1개.
+    """어블레이션 조건 1개
 
     label: 결과 라벨
     use_nnh: NNH로 방문 순서를 정할지 여부 (False면 배정 순서 유지)
@@ -77,7 +77,7 @@ class RoutingAblationRobot(Robot):
 
     def _route(self, start: Tuple[float, float], destinations: Sequence[Tuple[float, float]],
                layout: WarehouseLayout) -> List[Tuple[float, float]]:
-        """방문 순서를 정한다.
+        """방문 순서 결정
 
         입력:
             start: 출발 좌표
@@ -92,7 +92,7 @@ class RoutingAblationRobot(Robot):
 
     def _workstation_for(self, start: Tuple[float, float], route: Sequence[Tuple[float, float]],
                          layout: WarehouseLayout) -> int:
-        """주어진 경로의 복귀 워크스테이션을 정한다.
+        """주어진 경로의 복귀 워크스테이션 결정
 
         입력:
             start: 출발 좌표
@@ -110,7 +110,7 @@ class RoutingAblationRobot(Robot):
         )
 
     def assign_trip(self, destinations: List[Tuple[float, float]], layout: WarehouseLayout):
-        """현재 위치에서 출발하는 새 트립을 배정하고 이동을 시작한다.
+        """현재 위치에서 출발하는 새 트립 배정 및 이동 시작
 
         입력:
             destinations: 방문할 좌표 리스트
@@ -126,9 +126,9 @@ class RoutingAblationRobot(Robot):
         self._start_move()
 
     def insert_and_reorder(self, loc: Tuple[float, float], layout: WarehouseLayout):
-        """이동 중인 트립에 주문을 추가하고 남은 경로와 복귀 워크스테이션을 다시 정한다.
+        """이동 중인 트립에 주문을 추가하고 남은 경로와 복귀 워크스테이션 재설정
 
-        현재 목적지(current_dest)는 이미 이동 중이므로 바꾸지 않는다.
+        현재 목적지(current_dest)는 이미 이동 중이므로 유지
 
         입력:
             loc: 추가할 주문 위치
@@ -144,10 +144,10 @@ class RoutingAblationRobot(Robot):
 
     def delta_distance_insert(self, loc: Tuple[float, float], layout: WarehouseLayout,
                               target_ws_coords=None, dynamic_ws: bool = False) -> float:
-        """이 로봇이 실제로 수행할 삽입 방식 기준으로 늘어나는 이동거리를 계산한다.
+        """이 로봇이 실제로 수행할 삽입 방식 기준으로 늘어나는 이동거리 계산
 
-        target_ws_coords, dynamic_ws는 DQNAgent.build_candidates와 시그니처를
-        맞추기 위한 인자로, 여기서는 사용하지 않는다.
+        target_ws_coords, dynamic_ws: DQNAgent.build_candidates와 시그니처를
+        맞추기 위한 인자, 여기서는 미사용
 
         입력:
             loc: 추가할 주문 위치
@@ -174,14 +174,14 @@ class AblationRLSimulator(RLSimulator):
             *args, **kwargs: RLSimulator 인자
             spec: 어블레이션 조건
         """
-        # super().__init__ 안에서 _build_robots가 호출되므로 먼저 설정한다.
+        # super().__init__ 안에서 _build_robots가 호출되므로 먼저 설정
         self._ablation_spec = spec
         super().__init__(*args, **kwargs)
 
     def _build_robots(self) -> List[Robot]:
-        """조건에 맞는 RoutingAblationRobot을 생성한다.
+        """조건에 맞는 RoutingAblationRobot 생성
 
-        단일 워크스테이션 조건이면 모든 로봇을 그 워크스테이션에서 출발시킨다.
+        단일 워크스테이션 조건이면 모든 로봇이 그 워크스테이션에서 출발
 
         출력:
             로봇 리스트
@@ -202,7 +202,7 @@ class AblationRLSimulator(RLSimulator):
 def make_simulator(spec: AblationSpec, layout: WarehouseLayout, agent: DQNAgent,
                    lam: float, seed: int, sim_time: float, num_robots: int,
                    robot_capacity: int, eval_mode: bool):
-    """조건에 맞는 시뮬레이터를 만든다. 기본 조건이면 원래 RLSimulator를 쓴다.
+    """조건에 맞는 시뮬레이터 생성. 기본 조건이면 원래 RLSimulator 사용
 
     입력:
         spec: 어블레이션 조건
@@ -229,7 +229,7 @@ def make_simulator(spec: AblationSpec, layout: WarehouseLayout, agent: DQNAgent,
 def train_condition(spec: AblationSpec, layout: WarehouseLayout, agent: DQNAgent,
                     lam: float, seed: int, episodes: int, sim_time: float,
                     num_robots: int, robot_capacity: int) -> MetricsStore:
-    """조건 1개를 학습한다. 지역 RNG를 써서 모든 조건이 같은 에피소드 시드를 받는다.
+    """조건 1개 학습. 지역 RNG를 써서 모든 조건에 같은 에피소드 시드 적용
 
     입력:
         spec: 어블레이션 조건
@@ -270,7 +270,7 @@ def train_condition(spec: AblationSpec, layout: WarehouseLayout, agent: DQNAgent
 def evaluate_condition(spec: AblationSpec, layout: WarehouseLayout, agent: DQNAgent,
                        lam: float, seeds: Sequence[int], sim_time: float,
                        num_robots: int, robot_capacity: int) -> MetricsStore:
-    """조건 1개를 평가 시드마다 ε=0으로 실행한다.
+    """조건 1개를 평가 시드마다 ε=0으로 실행
 
     입력:
         spec: 어블레이션 조건
@@ -298,7 +298,7 @@ def evaluate_condition(spec: AblationSpec, layout: WarehouseLayout, agent: DQNAg
 
 def write_paired_summary(store: MetricsStore, specs: Sequence[AblationSpec], lam: float,
                          num_robots: int, path: str) -> None:
-    """시드별로 (기본 조건 − 어블레이션 조건) 지표 차이를 CSV로 저장한다.
+    """시드별로 (기본 조건 − 어블레이션 조건) 지표 차이를 CSV로 저장
 
     입력:
         store: 모든 조건의 평가 결과
@@ -331,7 +331,7 @@ def write_paired_summary(store: MetricsStore, specs: Sequence[AblationSpec], lam
 
 
 def main():
-    """CLI 인자로 세 조건을 학습/평가하고 결과 CSV와 비교표를 출력한다."""
+    """CLI 인자로 세 조건 학습/평가 후 결과 CSV와 비교표 출력"""
     parser = argparse.ArgumentParser(description="Paired routing ablation runner")
     parser.add_argument("--episodes", type=int, default=TOTAL_EPISODES)
     parser.add_argument("--n-eval", type=int, default=N_EVAL)
@@ -362,7 +362,7 @@ def main():
     for spec in specs:
         print(f"\nTraining {spec.label} ...")
         # 네트워크 초기화(torch)와 PER 샘플링(np.random)이 전역 RNG를 쓰므로,
-        # 모든 조건이 같은 초기 상태에서 시작하도록 매번 다시 고정한다.
+        # 모든 조건이 같은 초기 상태에서 시작하도록 매번 다시 고정
         random.seed(args.seed)
         np.random.seed(args.seed)
         torch.manual_seed(args.seed)

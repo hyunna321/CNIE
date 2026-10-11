@@ -1,4 +1,4 @@
-"""실험 실행 진입점.
+"""실험 실행 진입점
 
 사용법:
     python run.py                  # λ 그리드 실험 (기본값)
@@ -7,23 +7,71 @@
     python run.py ws-sweep         # λ = 800/hr, M=14, K=1,3,5 -> logs_experiment/workstation_sweep_m14/
     python run.py all              # 위 세 실험 전부
 
-    --episodes, --n-eval 로 학습 에피소드 수와 평가 시드 수를 바꿀 수 있다.
+    --episodes, --n-eval: 학습 에피소드 수와 평가 시드 수 지정
+    --grid: 셀 그리드 이동 모드(grid.GridWarehouseLayout)로 실행, 결과는
+    logs_grid_{traffic}_{motion}/, logs_experiment_grid_{traffic}_{motion}/ 에 따로 저장
+      --traffic free|lanes     모든 방향 이동 / 일방통행 통로 + 차선 교차통로 (기본 free)
+      --motion reserve|reactive 배정 시 시공간 경로 예약 / 막히면 대기·우회 (기본 reserve)
+      --no-collisions           reactive에서 로봇 간 점유를 무시 (회귀 검증용)
+    --scenario: 주문 도착/SKU 수요/저장/처리 시간 분포를 JSON 문자열이나 파일로 지정 (scenario.Scenario 필드)
+      예: --scenario '{"arrival": "batch", "batch_mean": 6, "sku_dist": "abc", "storage": "class_based"}'
+    학습한 에이전트는 결과 폴더에 agent_*.pt 체크포인트로 저장 (시각화 도구에서 불러오기 가능)
 """
 import argparse
+import json
 import os
 from typing import Dict, Iterable, List, Optional
 
 from environment import WarehouseLayout
+from grid import GridWarehouseLayout
+from scenario import Scenario
 from agents import DQNAgent
 from metrics import MetricsStore, TrainingCurveStore, print_comparison
 from training import train, evaluate_all
 from constant import (
+    GRID_TRAFFIC, GRID_MOTION,
     SIM_TIME, LAMBDA_GRID, DEFAULT_SEED, NUM_ROBOTS, ROBOT_CAPACITY,
     TOTAL_EPISODES, N_EVAL, EVAL_SEED_BASE, OUT_DIR, POLICY_LABELS,
     EXPERIMENT_LAMBDA, EXPERIMENT_OUT_DIR,
     EXPERIMENT_ROBOT_SWEEP, EXPERIMENT_ROBOT_SWEEP_K,
     EXPERIMENT_WS_SWEEP, EXPERIMENT_WS_SWEEP_M,
 )
+
+
+# 레이아웃 선택 (main()에서 --grid, --no-collisions로 설정)
+GRID_MODE       = False
+GRID_COLLISIONS = True
+GRID_OPTS       = {"traffic": GRID_TRAFFIC, "motion": GRID_MOTION}
+SCENARIO        = Scenario()
+
+
+def checkpoint_meta(lam: float, num_robots: int, num_workstations: int,
+                    total_episodes: int) -> dict:
+    """체크포인트에 함께 저장할 학습 조건"""
+    return {
+        "lam": lam, "num_robots": num_robots, "num_workstations": num_workstations,
+        "robot_capacity": ROBOT_CAPACITY, "episodes": total_episodes,
+        "grid": GRID_MODE, "traffic": GRID_OPTS["traffic"] if GRID_MODE else None,
+        "motion": GRID_OPTS["motion"] if GRID_MODE else None,
+        "scenario": SCENARIO.to_dict(),
+    }
+
+
+def make_layout(num_robots: int = NUM_ROBOTS,
+                num_workstations: Optional[int] = None) -> WarehouseLayout:
+    """현재 모드에 맞는 레이아웃 생성
+
+    입력:
+        num_robots: 로봇 수 M (그리드 모드의 대기열/주차 셀 크기 결정에 사용)
+        num_workstations: 워크스테이션 수 K (None이면 기본값)
+    출력:
+        WarehouseLayout 또는 GridWarehouseLayout
+    """
+    kw = {} if num_workstations is None else {"num_workstations": num_workstations}
+    if GRID_MODE:
+        return GridWarehouseLayout(seed=DEFAULT_SEED, num_robots=num_robots,
+                                   collisions=GRID_COLLISIONS, scenario=SCENARIO, **GRID_OPTS, **kw)
+    return WarehouseLayout(seed=DEFAULT_SEED, scenario=SCENARIO, **kw)
 
 
 # λ 그리드 실험
@@ -40,7 +88,7 @@ def experiment_lambda_grid(
     out_dir:        str = OUT_DIR,
     curve_store:    Optional[TrainingCurveStore] = None,
 ) -> Dict[float, DQNAgent]:
-    """λ마다 새 에이전트를 학습하고 RL/베이스라인을 평가해 CSV로 저장한다.
+    """λ마다 새 에이전트를 학습하고 RL/베이스라인을 평가해 CSV로 저장
 
     저장 파일 (out_dir):
         train_lam{λ}_M{M}.csv, eval_lam{λ}_M{M}_n{n_eval}.csv
@@ -83,6 +131,8 @@ def experiment_lambda_grid(
               label=f"RL_lam{lam_hr}_train",
               curve_store=curve_store)
         tr_store.save_csv(os.path.join(out_dir, f"train_lam{lam_hr}_M{num_robots}.csv"))
+        agent.save(os.path.join(out_dir, f"agent_lam{lam_hr}_M{num_robots}.pt"),
+                   checkpoint_meta(lam, num_robots, layout.num_workstations, total_episodes))
         agents[lam] = agent
 
         ev_store = MetricsStore()
@@ -104,7 +154,7 @@ def experiment_lambda_grid(
 
 def run_lambda_grid(total_episodes: int = TOTAL_EPISODES, n_eval: int = N_EVAL,
                     out_dir: str = OUT_DIR):
-    """λ 그리드 실험을 실행하고 전체 평가 결과와 학습 곡선을 out_dir에 저장한다.
+    """λ 그리드 실험 실행 후 전체 평가 결과와 학습 곡선을 out_dir에 저장
 
     저장 파일: eval_all_lambdas.csv, training_curves_all_lambdas.csv (+ λ별 CSV)
 
@@ -115,7 +165,7 @@ def run_lambda_grid(total_episodes: int = TOTAL_EPISODES, n_eval: int = N_EVAL,
     """
     os.makedirs(out_dir, exist_ok=True)
 
-    layout = WarehouseLayout(seed=DEFAULT_SEED)
+    layout = make_layout(NUM_ROBOTS)
 
     print("=" * 60)
     print(f"λ grid experiment  (M={NUM_ROBOTS} 고정, K={layout.num_workstations})")
@@ -144,7 +194,7 @@ def run_lambda_grid(total_episodes: int = TOTAL_EPISODES, n_eval: int = N_EVAL,
 def run_setting(experiment_name: str, num_robots: int, num_workstations: int,
                 total_episodes: int = TOTAL_EPISODES, n_eval: int = N_EVAL,
                 out_dir: str = EXPERIMENT_OUT_DIR) -> None:
-    """(M, K) 조건 하나에서 RL을 학습하고 RL/BL1~BL6를 평가해 저장한다.
+    """(M, K) 조건 하나에서 RL을 학습하고 RL/BL1~BL6를 평가해 저장
 
     저장 파일 (out_dir/experiment_name/M{m}_K{k}/):
         train.csv, training_curve.csv, evaluation.csv
@@ -162,7 +212,7 @@ def run_setting(experiment_name: str, num_robots: int, num_workstations: int,
     setting_dir = os.path.join(out_dir, experiment_name, setting_name)
     os.makedirs(setting_dir, exist_ok=True)
 
-    layout = WarehouseLayout(seed=DEFAULT_SEED, num_workstations=num_workstations)
+    layout = make_layout(num_robots, num_workstations)
     agent = DQNAgent(
         num_robots=num_robots,
         robot_capacity=ROBOT_CAPACITY,
@@ -189,6 +239,8 @@ def run_setting(experiment_name: str, num_robots: int, num_workstations: int,
     )
     train_store.save_csv(os.path.join(setting_dir, "train.csv"))
     curve_store.save_csv(os.path.join(setting_dir, "training_curve.csv"))
+    agent.save(os.path.join(setting_dir, "agent.pt"),
+               checkpoint_meta(EXPERIMENT_LAMBDA, num_robots, num_workstations, total_episodes))
 
     eval_store = MetricsStore()
     eval_seeds = list(range(EVAL_SEED_BASE, EVAL_SEED_BASE + n_eval))
@@ -215,7 +267,7 @@ def run_setting(experiment_name: str, num_robots: int, num_workstations: int,
 def run_grid(experiment_name: str, settings: Iterable[tuple[int, int]],
              total_episodes: int = TOTAL_EPISODES, n_eval: int = N_EVAL,
              out_dir: str = EXPERIMENT_OUT_DIR) -> None:
-    """여러 (M, K) 조건을 차례로 실행한다.
+    """여러 (M, K) 조건을 차례로 실행
 
     입력:
         experiment_name: 실험 이름
@@ -231,7 +283,7 @@ def run_grid(experiment_name: str, settings: Iterable[tuple[int, int]],
 
 def run_robot_sweep(total_episodes: int = TOTAL_EPISODES, n_eval: int = N_EVAL,
                     out_dir: str = EXPERIMENT_OUT_DIR):
-    """워크스테이션 수 K를 고정하고 로봇 수 M을 바꿔가며 실행한다.
+    """워크스테이션 수 K를 고정하고 로봇 수 M을 바꿔가며 실행
 
     입력:
         total_episodes: 조건당 학습 에피소드 수
@@ -245,7 +297,7 @@ def run_robot_sweep(total_episodes: int = TOTAL_EPISODES, n_eval: int = N_EVAL,
 
 def run_ws_sweep(total_episodes: int = TOTAL_EPISODES, n_eval: int = N_EVAL,
                  out_dir: str = EXPERIMENT_OUT_DIR):
-    """로봇 수 M을 고정하고 워크스테이션 수 K를 바꿔가며 실행한다.
+    """로봇 수 M을 고정하고 워크스테이션 수 K를 바꿔가며 실행
 
     입력:
         total_episodes: 조건당 학습 에피소드 수
@@ -258,7 +310,7 @@ def run_ws_sweep(total_episodes: int = TOTAL_EPISODES, n_eval: int = N_EVAL,
 
 
 def main():
-    """명령행 인자로 고른 실험을 실행한다."""
+    """명령행 인자로 고른 실험 실행"""
     parser = argparse.ArgumentParser(description="MTSR experiments")
     parser.add_argument("experiment", nargs="?", default="lambda-grid",
                         choices=["lambda-grid", "robot-sweep", "ws-sweep", "all"])
@@ -266,16 +318,50 @@ def main():
                         help="학습 에피소드 수")
     parser.add_argument("--n-eval", type=int, default=N_EVAL,
                         help="평가 시드 수")
+    parser.add_argument("--grid", action="store_true",
+                        help="셀 그리드 이동 모드 (충돌/혼잡 반영)")
+    parser.add_argument("--traffic", choices=["free", "lanes"], default=GRID_TRAFFIC,
+                        help="그리드 이동 규칙: 모든 방향(free) / 일방통행 통로 + 차선 교차통로(lanes)")
+    parser.add_argument("--motion", choices=["reserve", "reactive"], default=GRID_MOTION,
+                        help="그리드 충돌 처리: 시공간 경로 예약(reserve) / 막히면 대기·우회(reactive)")
+    parser.add_argument("--no-collisions", action="store_true",
+                        help="reactive에서 로봇 간 셀 점유를 무시 (회귀 검증용)")
+    parser.add_argument("--scenario", default=None,
+                        help="시나리오 JSON 문자열 또는 JSON 파일 경로 (scenario.Scenario 필드)")
     args = parser.parse_args()
 
+    global GRID_MODE, GRID_COLLISIONS, SCENARIO
+    if args.scenario:
+        text = open(args.scenario).read() if os.path.isfile(args.scenario) else args.scenario
+        SCENARIO = Scenario(**json.loads(text))
+    GRID_MODE       = args.grid
+    GRID_COLLISIONS = not args.no_collisions
+    GRID_OPTS.update(traffic=args.traffic, motion=args.motion)
+    suffix = ""
+    if GRID_MODE:
+        suffix = f"_grid_{args.traffic}_{args.motion}" + ("" if GRID_COLLISIONS else "_nocoll")
+    if not SCENARIO.is_default:
+        import hashlib
+        tag = hashlib.sha1(json.dumps(SCENARIO.to_dict(), sort_keys=True).encode()).hexdigest()[:6]
+        suffix += f"_sc{tag}"
+        print(f"시나리오 {tag}: {SCENARIO.to_dict()}")
+
+    out_dir = OUT_DIR + suffix
+    exp_dir = EXPERIMENT_OUT_DIR + suffix
+    if not SCENARIO.is_default:
+        for d in (out_dir, exp_dir):
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "scenario.json"), "w") as f:
+                json.dump(SCENARIO.to_dict(), f, indent=1, ensure_ascii=False)
+
     if args.experiment in ("lambda-grid", "all"):
-        run_lambda_grid(args.episodes, args.n_eval)
+        run_lambda_grid(args.episodes, args.n_eval, out_dir=out_dir)
     if args.experiment in ("robot-sweep", "all"):
-        run_robot_sweep(args.episodes, args.n_eval)
+        run_robot_sweep(args.episodes, args.n_eval, out_dir=exp_dir)
     if args.experiment in ("ws-sweep", "all"):
-        run_ws_sweep(args.episodes, args.n_eval)
+        run_ws_sweep(args.episodes, args.n_eval, out_dir=exp_dir)
     if args.experiment in ("robot-sweep", "ws-sweep", "all"):
-        print(f"\nDone. Results saved under: {EXPERIMENT_OUT_DIR}")
+        print(f"\nDone. Results saved under: {exp_dir}")
 
 
 if __name__ == "__main__":

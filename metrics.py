@@ -1,4 +1,4 @@
-"""에피소드 결과 컨테이너, CSV 저장, 정책 간 비교표 출력."""
+"""에피소드 결과 컨테이너, CSV 저장, 정책 간 비교표 출력"""
 from __future__ import annotations
 
 import csv
@@ -12,7 +12,7 @@ from constant import SIM_TIME
 
 @dataclass
 class EpisodeResult:
-    """에피소드 1회의 결과 지표."""
+    """에피소드 1회의 결과 지표"""
     label:                  str
     episode:                int
     lam:                    float
@@ -29,26 +29,31 @@ class EpisodeResult:
     saving_per_insertion:   float = 0.0   # m, 삽입 1건당 절감 이동거리
     reward:                 float = 0.0
     epsilon:                float = 0.0
+    blocked_time:           float = 0.0   # robot·s, 다른 로봇에 막혀 기다린 시간 (그리드 모드)
+    n_replans:              int   = 0     # 우회 경로 재계획 횟수 (그리드 reactive 모드)
+    n_plans:                int   = 0     # 시공간 경로계획 횟수 (그리드 reserve 모드)
+    n_plan_fail:            int   = 0     # 경로계획 실패 횟수 (그리드 reserve 모드)
+    plan_time_s:            float = 0.0   # 경로계획에 쓴 실행 시간 (그리드 reserve 모드)
 
     @property
     def completion_rate(self) -> float:
-        """완료 주문 수 / 도착 주문 수."""
+        """완료 주문 수 / 도착 주문 수"""
         return self.n_completed / max(1, self.n_arrived)
 
     @property
     def throughput(self) -> float:
-        """초당 완료 주문 수 (orders/s)."""
+        """초당 완료 주문 수 (orders/s)"""
         return self.n_completed / SIM_TIME
 
 
 class MetricsStore:
-    """EpisodeResult 목록을 모아 필터링하고 CSV로 저장한다."""
+    """EpisodeResult 목록 수집, 필터링, CSV 저장"""
 
     def __init__(self):
         self.records: List[EpisodeResult] = []
 
     def add(self, r: EpisodeResult):
-        """결과 1건을 추가한다.
+        """결과 1건 추가
 
         입력:
             r: 추가할 EpisodeResult
@@ -56,7 +61,7 @@ class MetricsStore:
         self.records.append(r)
 
     def save_csv(self, path: str):
-        """전체 결과를 CSV로 저장한다. completion_rate, throughput 열을 함께 기록한다.
+        """전체 결과 CSV 저장 (completion_rate, throughput 열 포함)
 
         입력:
             path: 저장 경로 (상위 디렉터리는 자동 생성)
@@ -79,7 +84,7 @@ class MetricsStore:
                lam: Optional[float] = None,
                num_robots: Optional[int] = None,
                last_n: Optional[int] = None) -> List[EpisodeResult]:
-        """조건에 맞는 결과만 골라낸다. None인 조건은 무시한다.
+        """조건에 맞는 결과만 선별 (None인 조건은 무시)
 
         입력:
             label: 정책 라벨
@@ -103,7 +108,7 @@ class MetricsStore:
 
 @dataclass
 class TrainingPoint:
-    """학습 곡선의 에피소드 1개 지점."""
+    """학습 곡선의 에피소드 1개 지점"""
     label:         str
     episode:       int
     reward:        float
@@ -114,13 +119,13 @@ class TrainingPoint:
 
 
 class TrainingCurveStore:
-    """학습 곡선 지점(TrainingPoint)을 모아 CSV로 저장한다."""
+    """학습 곡선 지점(TrainingPoint) 수집 및 CSV 저장"""
 
     def __init__(self):
         self.records: List[TrainingPoint] = []
 
     def add(self, p: TrainingPoint):
-        """지점 1개를 추가한다.
+        """지점 1개 추가
 
         입력:
             p: 추가할 TrainingPoint
@@ -128,7 +133,7 @@ class TrainingCurveStore:
         self.records.append(p)
 
     def save_csv(self, path: str):
-        """전체 지점을 CSV로 저장한다.
+        """전체 지점 CSV 저장
 
         입력:
             path: 저장 경로 (상위 디렉터리는 자동 생성)
@@ -160,7 +165,7 @@ METRIC_DISPLAY = {
 
 
 def _get_field(r: EpisodeResult, fname: str) -> float:
-    """EpisodeResult에서 지표 값을 읽는다 (property 지표 포함).
+    """EpisodeResult의 지표 값 읽기 (property 지표 포함)
 
     입력:
         r: 대상 결과
@@ -179,7 +184,7 @@ def compare_labels(store: MetricsStore, labels: List[str],
                    lam: Optional[float] = None,
                    num_robots: Optional[int] = None,
                    last_n: int = 10) -> Dict[str, Dict[str, float]]:
-    """정책별로 각 지표의 평균을 계산한다.
+    """정책별 각 지표의 평균 계산
 
     입력:
         store: 결과 저장소
@@ -207,7 +212,7 @@ def print_comparison(store: MetricsStore, labels: List[str],
                      lam: Optional[float] = None,
                      num_robots: Optional[int] = None,
                      last_n: int = 10, title: str = "Comparison"):
-    """정책별 지표 평균을 표로 출력한다. 지표마다 가장 좋은 값에 *를 붙인다.
+    """정책별 지표 평균을 표로 출력 (지표마다 가장 좋은 값에 * 표시)
 
     입력:
         store: 결과 저장소
@@ -249,7 +254,7 @@ def print_comparison(store: MetricsStore, labels: List[str],
 
 
 def _fmt(v: float) -> str:
-    """값 크기에 따라 자릿수를 달리해 문자열로 바꾼다.
+    """값 크기에 따라 자릿수를 달리해 문자열로 변환
 
     입력:
         v: 숫자

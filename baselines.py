@@ -13,10 +13,11 @@ from constant import PARTIAL_K, ROBOT_SPEED, SMDP_COST_DIST
 
 
 class BufferSimulator(SimulatorBase):
-    """idle 로봇에 주문을 쌓아 두었다가 depart_k개가 모이면 출발시키는 버퍼형 정책.
+    """idle 로봇에 주문을 쌓아 두었다가 depart_k개가 모이면 출발시키는 버퍼형 정책
 
-    주문은 빈 슬롯이 가장 많은 idle 로봇에 쌓이고, 출발 시점에 모인 목적지
-    전체 기준으로 복귀 워크스테이션이 정해진다. mid-trip 삽입은 없다.
+    - 주문은 빈 슬롯이 가장 많은 idle 로봇에 적재
+    - 복귀 워크스테이션은 출발 시점에 모인 목적지 전체 기준으로 결정
+    - mid-trip 삽입 없음
     """
 
     def __init__(self, *args, depart_k: Optional[int] = None, **kwargs):
@@ -29,9 +30,9 @@ class BufferSimulator(SimulatorBase):
         self.depart_k = depart_k if depart_k is not None else self.robot_capacity
 
     def _on_order_arrival(self):
-        """새 주문을 빈 슬롯이 가장 많은 idle 로봇에 쌓고, depart_k개가 되면 출발시킨다.
+        """새 주문을 빈 슬롯이 가장 많은 idle 로봇에 쌓고 depart_k개가 되면 출발
 
-        idle 로봇이 없으면 대기 큐에 넣는다.
+        idle 로봇이 없으면 대기 큐에 넣음
         """
         order = self.order_mgr.create_order(self.now)
         idle  = [r for r in self.robots if r.is_idle and r.idle_slots > 0]
@@ -48,7 +49,7 @@ class BufferSimulator(SimulatorBase):
             self.order_mgr.enqueue(order, self.now)
 
     def _on_trip_complete(self, robot: Robot):
-        """트립 완료 후 대기 큐에서 최대 용량만큼 꺼내 싣고, depart_k개 이상이면 바로 출발시킨다.
+        """트립 완료 후 대기 큐에서 최대 용량만큼 꺼내 싣고 depart_k개 이상이면 바로 출발
 
         입력:
             robot: 트립을 마친 로봇
@@ -57,6 +58,8 @@ class BufferSimulator(SimulatorBase):
         orders = self.order_mgr.dequeue_up_to(self.robot_capacity)
         if orders:
             self._robot_orders[robot.id] = list(orders)
+            for o in orders:
+                self._record_service_start(o, self.now)
             robot.idle_slots = self.robot_capacity - len(orders)
             if len(orders) >= self.depart_k:
                 robot.assign_trip([o.loc for o in orders], self.layout)
@@ -64,11 +67,11 @@ class BufferSimulator(SimulatorBase):
 
 
 class FullBufferSimulator(BufferSimulator):
-    """BL1 Full-Buffer: idle 로봇의 슬롯이 모두 찬 뒤에 출발한다 (depart_k = 로봇 용량)."""
+    """BL1 Full-Buffer: idle 로봇의 슬롯이 모두 찬 뒤에 출발 (depart_k = 로봇 용량)"""
 
 
 class PartialSimulator(BufferSimulator):
-    """BL2 Partial-Buffer: idle 로봇에 주문이 partial_k개 쌓이면 바로 출발한다."""
+    """BL2 Partial-Buffer: idle 로봇에 주문이 partial_k개 쌓이면 바로 출발"""
 
     def __init__(self, *args, partial_k: int = PARTIAL_K, **kwargs):
         """
@@ -81,14 +84,14 @@ class PartialSimulator(BufferSimulator):
 
 
 class InsertionSimulator(SimulatorBase):
-    """빈 슬롯이 있는 로봇(idle + mid-trip) 중 하나를 골라 즉시 배정하는 삽입형 정책.
+    """빈 슬롯이 있는 로봇(idle + mid-trip) 중 하나를 골라 즉시 배정하는 삽입형 정책
 
-    하위 클래스는 _select_robot()으로 로봇 선택 규칙만 정의한다.
+    하위 클래스는 _select_robot()으로 로봇 선택 규칙만 정의
     """
 
     def _select_robot(self, order: Order, eligible: List[Robot],
                       target_coords: Tuple[float, float]) -> Robot:
-        """배정할 로봇을 고른다. 하위 클래스가 구현한다.
+        """배정할 로봇 선택 (하위 클래스에서 구현)
 
         입력:
             order: 새 주문
@@ -100,7 +103,7 @@ class InsertionSimulator(SimulatorBase):
         raise NotImplementedError
 
     def _on_order_arrival(self):
-        """새 주문을 _select_robot()이 고른 로봇에 배정한다. 후보가 없으면 대기 큐에 넣는다."""
+        """새 주문을 _select_robot()이 고른 로봇에 배정 (후보가 없으면 대기 큐에 넣음)"""
         order    = self.order_mgr.create_order(self.now)
         eligible = self._eligible_robots()
         if not eligible:
@@ -114,10 +117,10 @@ class InsertionSimulator(SimulatorBase):
 
 
 class RandomAssignSimulator(InsertionSimulator):
-    """BL3 Random: 후보 로봇 중 무작위로 배정한다."""
+    """BL3 Random: 후보 로봇 중 무작위 배정"""
 
     def reset(self, seed: int):
-        """에피소드 상태와 배정용 난수 생성기를 초기화한다.
+        """에피소드 상태와 배정용 난수 생성기 초기화
 
         입력:
             seed: 주문 생성 및 배정 난수 시드
@@ -126,46 +129,46 @@ class RandomAssignSimulator(InsertionSimulator):
         self._assign_rng = random.Random(seed)
 
     def _select_robot(self, order, eligible, target_coords):
-        """후보 중 무작위 1대."""
+        """후보 중 무작위 1대"""
         return self._assign_rng.choice(eligible)
 
 
 class NearestRobotSimulator(InsertionSimulator):
-    """BL4 Nearest: 주문 위치까지 현재 거리가 가장 짧은 로봇에 배정한다."""
+    """BL4 Nearest: 주문 위치까지 현재 거리가 가장 짧은 로봇에 배정"""
 
     def _select_robot(self, order, eligible, target_coords):
-        """현재 위치(pos)가 주문 위치와 가장 가까운 후보."""
+        """현재 위치(pos)가 주문 위치와 가장 가까운 후보"""
         return min(eligible,
                    key=lambda r: self.layout.aisle_distance(r.pos, order.loc))
 
 
 class MinInsertionSimulator(InsertionSimulator):
-    """BL5 Min-Insertion: 삽입 detour가 최소인 로봇에 배정한다.
+    """BL5 Min-Insertion: 삽입 detour가 최소인 로봇에 배정
 
-    detour 계산 기준은 RLSimulator와 같다 (idle 후보는 주문에서 가장 가까운
-    워크스테이션 복귀 가정, mid-trip 후보는 최적 복귀 워크스테이션 재탐색).
+    detour 계산 기준은 RLSimulator와 동일 (idle 후보는 주문에서 가장 가까운
+    워크스테이션 복귀 가정, mid-trip 후보는 최적 복귀 워크스테이션 재탐색)
     """
 
     def _select_robot(self, order, eligible, target_coords):
-        """삽입 시 추가 이동거리가 가장 작은 후보."""
+        """삽입 시 추가 이동거리가 가장 작은 후보"""
         return min(eligible,
                    key=lambda r: self._insertion_delta(r, order.loc, target_coords))
 
 
 class MarginalCostSimulator(InsertionSimulator):
-    """BL6 Marginal-Cost: 배정으로 늘어나는 (flow time + c_d · 이동거리)가 최소인 로봇에 배정한다.
+    """BL6 Marginal-Cost: 배정으로 늘어나는 (flow time + c_d · 이동거리)가 최소인 로봇에 배정
 
     탑재 주문은 모두 트립 종료 시점에 함께 완료되므로, 이후 삽입이 없다고 보면
-    한계 비용을 정확히 계산할 수 있다.
+    한계 비용을 정확히 계산 가능
       - 기존 탑재 주문 지연: n_onboard · Δd / v
       - 새 주문 flow time : 삽입 후 남은 경로 거리 / v
       - 이동거리 증가     : mid-trip이면 Δd, idle이면 새 트립 전체 거리
-    RL의 smdp 보상과 같은 목적함수를 한 결정 단위로 greedy하게 최소화한다.
+    RL의 smdp 보상과 같은 목적함수를 한 결정 단위로 greedy하게 최소화
     """
 
     def _marginal_cost(self, robot: Robot, order: Order,
                        target_coords: Tuple[float, float]) -> float:
-        """로봇에 주문을 넣을 때의 한계 비용 (order·s 단위).
+        """로봇에 주문을 넣을 때의 한계 비용 (order·s 단위)
 
         입력:
             robot: 후보 로봇
@@ -187,30 +190,30 @@ class MarginalCostSimulator(InsertionSimulator):
         return delay_onboard + remaining_after / ROBOT_SPEED + SMDP_COST_DIST * added_distance
 
     def _select_robot(self, order, eligible, target_coords):
-        """한계 비용이 가장 작은 후보."""
+        """한계 비용이 가장 작은 후보"""
         return min(eligible,
                    key=lambda r: self._marginal_cost(r, order, target_coords))
 
 
 class GreedyRewardSimulator(InsertionSimulator):
-    """Greedy-R: RL(legacy)과 같은 즉시 보상 compute_reward를 최대화하는 로봇에 배정한다.
+    """Greedy-R: RL(legacy)과 같은 즉시 보상 compute_reward를 최대화하는 로봇에 배정
 
-    후보 집합, detour 계산, 라우팅(NNH + 복귀 워크스테이션 재선택), 보상 인자는
-    RLSimulator(reward_mode="legacy")와 같다. DDQN과의 차이는 n-step 가치 추정의
-    유무뿐이므로, 학습의 증분 가치를 분리하는 대조군이다.
+    - 후보 집합, detour 계산, 라우팅(NNH + 복귀 워크스테이션 재선택), 보상 인자는
+      RLSimulator(reward_mode="legacy")와 동일
+    - DDQN과의 차이는 n-step 가치 추정의 유무뿐이므로, 학습의 증분 가치를 분리하는 대조군
     """
 
     def __init__(self, *args, reward_cfg=None, **kwargs):
         """
         입력:
             *args, **kwargs: SimulatorBase 인자
-            reward_cfg: compute_reward 가중치 덮어쓰기용 kwargs (RL과 같게 맞춘다)
+            reward_cfg: compute_reward 가중치 덮어쓰기용 kwargs (RL과 동일하게 설정)
         """
         super().__init__(*args, **kwargs)
         self.reward_cfg = reward_cfg or {}
 
     def _select_robot(self, order, eligible, target_coords):
-        """즉시 보상이 가장 큰 후보. 동점이면 eligible 순서상 앞선 후보 (np.argmax와 같음)."""
+        """즉시 보상이 가장 큰 후보. 동점이면 eligible 순서상 앞선 후보 (np.argmax와 같음)"""
         n_wait = self.order_mgr.queue_size()
 
         def reward(r):

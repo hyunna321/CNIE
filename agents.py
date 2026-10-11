@@ -5,7 +5,7 @@ import torch.optim as optim
 import random
 import warnings
 from collections import deque
-from typing import List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 
 from environment import WarehouseLayout, Robot, nearest_workstation
 from constant import (
@@ -15,28 +15,32 @@ from constant import (
     MAX_CANDIDATES, MAX_CANDIDATES_MARGIN,
     PER_ALPHA, PER_BETA_START, PER_BETA_END, PER_PRIORITY_EPS,
     QUEUE_NORM_FALLBACK, DELTA_NORM_CLIP,
-    TOTAL_EPISODES,
+    TOTAL_EPISODES, ROBOT_SPEED, SMDP_COST_DIST,
 )
 
+FEATURE_SETS = ("base", "bl6")
+BL6_EXTRA_DIM = 5   # feature_set="bl6"일 때 추가되는 특징 수
 
-def candidate_feature_dim(robot_capacity: int) -> int:
-    """(주문, 후보 로봇) 쌍 특징벡터의 차원.
+
+def candidate_feature_dim(robot_capacity: int, feature_set: str = "base") -> int:
+    """(주문, 후보 로봇) 쌍 특징벡터의 차원
 
     구성: 주문 상대좌표 2 + 삽입 detour 1 + 로봇 상태 (5 + capacity*2)
           + 컨텍스트 2 (큐 길이, 경과시간)
+          + (feature_set="bl6"이면) BL6 한계비용 구성요소 5
 
     입력:
         robot_capacity: 로봇 용량
     출력:
         특징 차원 수
     """
-    return 2 + 1 + (5 + robot_capacity * 2) + 2
+    return 2 + 1 + (5 + robot_capacity * 2) + 2 + (BL6_EXTRA_DIM if feature_set == "bl6" else 0)
 
 
 class RobotScoreNet(nn.Module):
     """(주문, 후보 로봇) 쌍 하나의 Q값을 출력하는 MLP.
 
-    후보마다 같은 파라미터로 독립 평가하므로 로봇 수와 무관하게 크기가 고정된다.
+    후보마다 같은 파라미터로 독립 평가하므로 로봇 수와 무관하게 크기 고정
     """
 
     def __init__(self, feat_dim: int):
@@ -63,11 +67,11 @@ class RobotScoreNet(nn.Module):
 
 
 class PrioritizedReplayBuffer:
-    """TD 오차 기반 우선순위 경험 재생 버퍼 (PER).
+    """TD 오차 기반 우선순위 경험 재생 버퍼 (PER)
 
     저장 항목: (feat, reward, next_feats[max_candidates, feat_dim],
                next_mask[max_candidates], done, discount)
-    discount는 n-step 이후 부트스트랩 항에 곱할 할인 계수다.
+    discount: n-step 이후 부트스트랩 항에 곱할 할인 계수
     """
 
     def __init__(self, capacity: int = REPLAY_BUFFER_SIZE, alpha: float = PER_ALPHA,
@@ -88,7 +92,7 @@ class PrioritizedReplayBuffer:
         self.rng           = np.random.default_rng(seed)
 
     def push(self, feat, reward, next_feats, next_mask, done, discount):
-        """전이 1건을 현재까지의 최대 우선순위로 저장한다.
+        """전이 1건을 현재까지의 최대 우선순위로 저장
 
         입력:
             feat: 선택한 후보의 특징
@@ -104,7 +108,7 @@ class PrioritizedReplayBuffer:
         self.size = min(self.size + 1, self.capacity)
 
     def sample(self, batch_size: int, beta: float = PER_BETA_START):
-        """우선순위 비례 확률로 배치를 샘플링한다.
+        """우선순위 비례 확률로 배치 샘플링
 
         입력:
             batch_size: 배치 크기
@@ -131,7 +135,7 @@ class PrioritizedReplayBuffer:
         )
 
     def update_priorities(self, idxs, td_errors):
-        """샘플된 항목의 우선순위를 |TD 오차|로 갱신한다.
+        """샘플된 항목의 우선순위를 |TD 오차|로 갱신
 
         입력:
             idxs: 버퍼 인덱스 배열
@@ -146,10 +150,10 @@ class PrioritizedReplayBuffer:
 
 
 class NStepBuffer:
-    """n-step 누적 보상을 만들기 위한 임시 버퍼.
+    """n-step 누적 보상을 만들기 위한 임시 버퍼
 
     항목 형식: (feat, reward, next_feats, next_mask, done, discount)
-    discount는 그 전이 하나의 할인 계수다 (legacy: γ, SMDP: e^{-βτ}).
+    discount: 그 전이 하나의 할인 계수 (legacy: γ, SMDP: e^{-βτ})
     G = r_0 + g_0·r_1 + g_0·g_1·r_2 + ..., 부트스트랩 할인 = Π g_i.
     """
 
@@ -162,7 +166,7 @@ class NStepBuffer:
         self.buf = deque()
 
     def push(self, transition):
-        """1-step 전이를 추가한다.
+        """1-step 전이 추가
 
         입력:
             transition: (feat, reward, next_feats, next_mask, done, discount)
@@ -174,7 +178,7 @@ class NStepBuffer:
         return len(self.buf) >= self.n
 
     def _accumulate(self):
-        """가장 오래된 전이 기준 n-step 전이를 만들고 그 전이를 버퍼에서 뺀다."""
+        """가장 오래된 전이 기준 n-step 전이 생성 후 그 전이를 버퍼에서 제거"""
         feat0 = self.buf[0][0]
         _, _, nf, nm, d, _ = self.buf[-1]
         G, disc = 0.0, 1.0
@@ -187,7 +191,7 @@ class NStepBuffer:
         return (feat0, G, nf, nm, d, disc)
 
     def get(self):
-        """가장 오래된 전이 기준 n-step 전이를 만든다.
+        """가장 오래된 전이 기준 n-step 전이 생성
 
         출력:
             (feat0, G, next_feats_n, next_mask_n, done_n, discount_n)
@@ -195,7 +199,7 @@ class NStepBuffer:
         return self._accumulate()
 
     def flush(self):
-        """에피소드 종료 시 남은 전이를 모두 n-step 전이로 변환해 비운다.
+        """에피소드 종료 시 남은 전이를 모두 n-step 전이로 변환 후 비움
 
         출력:
             (feat0, G, next_feats, next_mask, done, discount) 리스트
@@ -207,15 +211,15 @@ class NStepBuffer:
 
 
 class DQNAgent:
-    """후보 스코어링 방식의 Double DQN 에이전트.
+    """후보 스코어링 방식의 Double DQN 에이전트
 
-    행동은 그 순간 배정 가능한 후보 로봇 리스트 내 인덱스이며,
-    각 후보를 RobotScoreNet으로 스코어링해 최댓값을 고른다.
+    - 행동: 그 순간 배정 가능한 후보 로봇 리스트 내 인덱스
+    - 각 후보를 RobotScoreNet으로 스코어링해 최댓값 선택
     """
 
     def __init__(self, robot_capacity: int, seed: int = DEFAULT_SEED,
                 sim_time: float = SIM_TIME, num_robots: Optional[int] = None,
-                num_workstations: int = NUM_WORKSTATIONS):
+                num_workstations: int = NUM_WORKSTATIONS, feature_set: str = "base"):
         """
         입력:
             robot_capacity: 로봇 용량
@@ -223,12 +227,15 @@ class DQNAgent:
             sim_time: 경과시간 정규화 기준 (s)
             num_robots: 로봇 수 (최대 후보 수 결정, 로깅용)
             num_workstations: 워크스테이션 수 (로깅용)
+            feature_set: "base" 또는 "bl6" (BL6 한계비용 구성요소 5개 추가)
         """
+        assert feature_set in FEATURE_SETS, feature_set
+        self.feature_set      = feature_set
         self.robot_capacity   = robot_capacity
         self.sim_time         = sim_time
         self.num_robots       = num_robots
         self.num_workstations = num_workstations
-        self.feat_dim         = candidate_feature_dim(robot_capacity)
+        self.feat_dim         = candidate_feature_dim(robot_capacity, feature_set)
 
         if num_robots is not None:
             self.max_candidates = max(MAX_CANDIDATES, num_robots + MAX_CANDIDATES_MARGIN)
@@ -236,7 +243,7 @@ class DQNAgent:
             self.max_candidates = MAX_CANDIDATES
 
         # 네트워크 초기화가 전역 torch RNG를 쓰므로, 생성 순서와 무관하게
-        # 재현되도록 네트워크 생성 전에 시드를 고정한다.
+        # 재현되도록 네트워크 생성 전에 시드 고정
         torch.manual_seed(seed)
 
         self.device     = torch.device("cpu")
@@ -259,11 +266,11 @@ class DQNAgent:
                          robots: List[Robot], n_wait: int,
                          layout: WarehouseLayout, now: float = 0.0,
                          ws_capacity: Optional[float] = None) -> np.ndarray:
-        """후보 로봇마다 (주문, 로봇) 특징벡터를 만든다.
+        """후보 로봇마다 (주문, 로봇) 특징벡터 생성
 
-        삽입 detour는 idle 후보면 주문 위치에서 가장 가까운 워크스테이션으로
-        복귀한다고 가정하고, mid-trip 후보면 주문 포함 후 최적 워크스테이션을
-        재탐색해 계산한다 (실제 insert_and_reorder 결과와 같은 기준).
+        삽입 detour 계산 기준 (실제 insert_and_reorder 결과와 같은 기준):
+        - idle 후보: 주문 위치에서 가장 가까운 워크스테이션으로 복귀 가정
+        - mid-trip 후보: 주문 포함 후 최적 워크스테이션 재탐색
 
         입력:
             order_loc: 주문 위치
@@ -292,11 +299,36 @@ class DQNAgent:
                 order_loc, layout, target_ws_coords=end, dynamic_ws=(not r.is_idle))
             delta_norm = min(delta_ins / layout.dist_norm, DELTA_NORM_CLIP)
             robot_feat = r.state_vector(self.robot_capacity).tolist()
-            feats[i]   = order_rel + [delta_norm] + robot_feat + [queue_norm, elapsed_norm]
+            row = order_rel + [delta_norm] + robot_feat + [queue_norm, elapsed_norm]
+            if self.feature_set == "bl6":
+                row += self._bl6_features(r, order_loc, layout, delta_ins, target_coords)
+            feats[i]   = row
         return feats
 
+    def _bl6_features(self, r: Robot, order_loc, layout: WarehouseLayout,
+                      delta_ins: float, target_coords) -> List[float]:
+        """BL6(MarginalCostSimulator._marginal_cost)와 같은 식의 한계비용 구성요소를 정규화해 반환
+
+        [적재 주문 비율, 적재 주문 지연, 배정 후 남은 거리, 추가 이동거리, 한계비용 합계]
+        정규화 기준: 거리는 layout.dist_norm, 시간은 dist_norm / 속도
+        """
+        onboard = self.robot_capacity - r.idle_slots
+        dist    = layout.aisle_distance
+        if r.is_idle:
+            remaining_after = dist(r.pos, order_loc) + dist(order_loc, target_coords)
+            delay_onboard   = 0.0
+            added_distance  = remaining_after
+        else:
+            remaining_after = r.remaining_distance + delta_ins
+            delay_onboard   = onboard * delta_ins / ROBOT_SPEED
+            added_distance  = delta_ins
+        mc = delay_onboard + remaining_after / ROBOT_SPEED + SMDP_COST_DIST * added_distance
+        dn, tn = layout.dist_norm, layout.dist_norm / ROBOT_SPEED
+        return [onboard / self.robot_capacity, min(delay_onboard / tn, 5.0), min(remaining_after / dn, 5.0),
+                min(added_distance / dn, 5.0), min(mc / tn, 10.0)]
+
     def _pad(self, feats: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """후보 특징을 max_candidates 길이로 0-패딩한다. 초과분은 경고 후 버린다.
+        """후보 특징을 max_candidates 길이로 0-패딩 (초과분은 경고 후 버림)
 
         입력:
             feats: (n, feat_dim) 후보 특징
@@ -319,7 +351,7 @@ class DQNAgent:
         return padded, mask
 
     def select_index(self, cand_feats: np.ndarray) -> int:
-        """ε-greedy로 후보 하나를 고른다.
+        """ε-greedy로 후보 하나 선택
 
         입력:
             cand_feats: (n_eligible, feat_dim) 후보 특징
@@ -338,7 +370,7 @@ class DQNAgent:
     def push(self, feat: np.ndarray, reward: float,
             next_feats: Optional[np.ndarray], done: bool,
             discount: float = GAMMA):
-        """전이를 n-step 버퍼를 거쳐 리플레이 버퍼에 저장한다.
+        """전이를 n-step 버퍼를 거쳐 리플레이 버퍼에 저장
 
         입력:
             feat: 선택한 후보의 특징
@@ -360,9 +392,9 @@ class DQNAgent:
                 self.buffer.push(*t)
 
     def train_step(self) -> Optional[float]:
-        """리플레이 버퍼에서 배치 하나를 뽑아 Double DQN 업데이트를 1회 수행한다.
+        """리플레이 버퍼에서 배치 하나를 뽑아 Double DQN 업데이트 1회 수행
 
-        다음 상태의 행동은 policy_net으로 고르고 값은 target_net으로 평가한다.
+        다음 상태의 행동은 policy_net으로 선택, 값은 target_net으로 평가
 
         출력:
             가중 MSE 손실값, 버퍼가 BATCH_SIZE보다 작으면 None
@@ -412,7 +444,7 @@ class DQNAgent:
         return loss.item()
 
     def decay_epsilon(self, total_episodes: int = TOTAL_EPISODES):
-        """에피소드 종료마다 ε을 감소시키고 PER β를 선형 증가시킨다.
+        """에피소드 종료마다 ε 감소, PER β 선형 증가
 
         입력:
             total_episodes: 전체 학습 에피소드 수 (β 증가 폭 결정)
@@ -421,11 +453,12 @@ class DQNAgent:
         self.beta    = min(self.beta_end,
                            self.beta + (self.beta_end - PER_BETA_START) / total_episodes)
 
-    def save(self, path: str):
-        """네트워크 가중치와 학습 상태를 체크포인트로 저장한다.
+    def save(self, path: str, meta: Optional[Dict] = None):
+        """네트워크 가중치와 학습 상태를 체크포인트로 저장
 
         입력:
             path: 저장 경로
+            meta: 학습 조건 기록 (λ, 레이아웃/이동 모드, 시나리오 등, 시각화 도구에서 읽음)
         """
         torch.save({
             "policy_state": self.policy_net.state_dict(),
@@ -436,10 +469,13 @@ class DQNAgent:
             "robot_capacity": self.robot_capacity,
             "num_robots":      self.num_robots,
             "num_workstations": self.num_workstations,
+            "sim_time":        self.sim_time,
+            "feature_set":     self.feature_set,
+            "meta":            meta or {},
         }, path)
 
     def load(self, path: str):
-        """save()로 저장한 체크포인트를 불러온다.
+        """save()로 저장한 체크포인트 로드
 
         입력:
             path: 체크포인트 경로

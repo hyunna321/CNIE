@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MTSR Sim Viewer</title>
+<style>
+/* 레이아웃: 왼쪽 설정 | 가운데 창고 지도 + 재생 막대 | 오른쪽 지표·로봇·RL 결정 */
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --line: #dfe2e8; --fg: #1d2330; --muted: #677085;
+  --accent: #2f5bd3; --accent-fg: #ffffff; --warn-bg: #fff4e0; --warn-fg: #8a5300;
+  --rack: #4a63b8; --aisle: #eef2fa; --pick: #d9e3f6; --cross: #faf3e1; --ws: #e3e5ea;
+  --queue: #f3c7b6; --dock: #c4573b; --spot: #cde8d9;
+  --cell-border: #ece0c4; --grid: rgba(28, 38, 60, .16); --grid-major: rgba(28, 38, 60, .38);
+  --st-parked: #8b93a3; --st-topark: #b9c0cc; --st-moving: #1f4fd1; --st-waiting: #e0301e;
+  --st-picking: #ef9b00; --st-ws: #7a2e1d;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171d; --panel: #1c2028; --line: #2d333f; --fg: #e3e7ef; --muted: #98a1b3;
+    --accent: #6b8cff; --accent-fg: #0d1020; --warn-bg: #3a2c12; --warn-fg: #ffcf87;
+    --rack: #5670c9; --aisle: #252b36; --pick: #2c3648; --cross: #2e2a20; --ws: #2a2e37;
+    --queue: #5a3a30; --dock: #d9694c; --spot: #24402f;
+    --cell-border: #3a3528; --grid: rgba(255, 255, 255, .10); --grid-major: rgba(255, 255, 255, .28);
+    --st-parked: #7e8798; --st-topark: #5b6373; --st-moving: #6f95ff; --st-waiting: #ff5a45;
+    --st-picking: #ffb02e; --st-ws: #c9785e;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--fg); font: 13px/1.45 var(--sans); display: flex; flex-direction: column; }
+header { display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+header h1 { font-size: 15px; margin: 0; letter-spacing: .2px; }
+header .runinfo { color: var(--muted); font-family: var(--mono); font-size: 12px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app { display: grid; grid-template-columns: 300px minmax(0, 1fr) 340px; flex: 1; min-height: 0; }
+aside, main { min-width: 0; overflow: auto; }
+aside { background: var(--panel); border-right: 1px solid var(--line); padding: 12px 14px; }
+aside.right { border-right: 0; border-left: 1px solid var(--line); }
+main { display: flex; flex-direction: column; padding: 10px; gap: 8px; }
+h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 14px 0 6px; }
+h2:first-child { margin-top: 0; }
+label { display: grid; grid-template-columns: 1fr 112px; align-items: center; column-gap: 6px; margin: 5px 0; }
+label > input, label > select { grid-column: 2; grid-row: 1 / span 2; }
+label > small { grid-column: 1; grid-row: 2; color: var(--muted); font-size: 11px; line-height: 1.3; }
+label.check { grid-template-columns: auto 1fr; }
+label.check > input { grid-column: 1; grid-row: 1; }
+input, select { width: 100%; padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg); font: 12px var(--mono); }
+input[type=checkbox] { width: auto; }
+button { padding: 6px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--fg); cursor: pointer; font: inherit; }
+button:hover { border-color: var(--accent); }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); width: 100%; padding: 8px; font-weight: 600; }
+button:disabled { opacity: .5; cursor: default; }
+.presets { display: flex; flex-wrap: wrap; gap: 4px; }
+.presets button { font-size: 11px; padding: 3px 7px; }
+.warn { background: var(--warn-bg); color: var(--warn-fg); border-radius: 4px; padding: 6px 8px; margin-top: 8px; font-size: 12px; }
+.warn:empty { display: none; }
+.note { color: var(--muted); font-size: 11px; margin-top: 10px; }
+.mapwrap { position: relative; flex: 1; min-height: 300px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+#map { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
+.empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); text-align: center; padding: 20px; }
+.toolbar, .player { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.toolbar label { display: flex; gap: 4px; margin: 0; color: var(--muted); }
+.toolbar select { width: auto; }
+.player { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+.player input[type=range] { flex: 1; min-width: 120px; }
+.player select { width: auto; }
+.player .time { font-family: var(--mono); font-variant-numeric: tabular-nums; min-width: 150px; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px; color: var(--muted); font-size: 11px; }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
+.kpis { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.kpi { border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px; }
+.kpi b { display: block; font: 600 15px var(--mono); font-variant-numeric: tabular-nums; }
+.kpi span { color: var(--muted); font-size: 11px; }
+canvas.chart { width: 100%; height: 86px; display: block; border: 1px solid var(--line); border-radius: 5px; margin-bottom: 4px; }
+.chartlabel { display: flex; gap: 10px; font-size: 11px; color: var(--muted); margin-top: 6px; }
+.chartlabel i { display: inline-block; width: 10px; height: 2px; vertical-align: 3px; margin-right: 3px; }
+table { width: 100%; border-collapse: collapse; font: 11px var(--mono); font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 2px 4px; border-bottom: 1px solid var(--line); }
+th:first-child, td:first-child { text-align: left; }
+tr.sel td { font-weight: 700; }
+.dec { border: 1px solid var(--line); border-radius: 5px; padding: 5px 7px; margin-bottom: 5px; cursor: pointer; }
+.dec:hover { border-color: var(--accent); }
+.dec .hd { display: flex; justify-content: space-between; font: 11px var(--mono); }
+.tag { font: 600 10px var(--mono); padding: 1px 5px; border-radius: 3px; }
+.tag.ok { background: #d8f2e3; color: #13633a; } .tag.diff { background: #fde2dc; color: #9b2412; }
+@media (prefers-color-scheme: dark) { .tag.ok { background: #183d29; color: #8fe0b0; } .tag.diff { background: #47201a; color: #ffab9a; } }
+.robotinfo { font: 12px var(--mono); white-space: pre-wrap; word-break: break-all; }
+.rlist { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 4px; }
+.rchip { display: grid; grid-template-columns: 12px 1fr auto; align-items: center; gap: 5px; padding: 3px 6px;
+         border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--fg);
+         font: 11px var(--mono); text-align: left; cursor: pointer; font-variant-numeric: tabular-nums; }
+.rchip i { width: 12px; height: 12px; border-radius: 50%; box-sizing: border-box; }
+.rchip small { color: var(--muted); grid-column: 2 / 4; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rchip.sel { border-color: var(--fg); box-shadow: inset 0 0 0 1px var(--fg); }
+.spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--accent-fg); border-right-color: transparent; border-radius: 50%; animation: s .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+@keyframes s { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+@media (max-width: 1100px) { body { display: block; } .app { grid-template-columns: 1fr; } .mapwrap { min-height: 70vh; } aside { border: 0; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>MTSR Sim Viewer</h1>
+  <div class="runinfo" id="runinfo">설정을 고르고 실행하세요</div>
+  <a id="exportBtn" hidden><button type="button">Export replay</button></a>
+</header>
+<div class="app">
+  <aside id="cfgPanel">
+    <h2>시나리오 프리셋</h2>
+    <div class="presets" id="presets"></div>
+    <h2>배정 정책</h2>
+    <label>정책<select id="policy"></select></label>
+    <div id="ckptBox" hidden>
+      <label>체크포인트<select id="ckptSel"></select></label>
+      <label>경로 직접 입력<input id="ckptPath" placeholder="logs_grid_.../agent.pt"></label>
+      <div class="note" id="ckptMeta"></div>
+    </div>
+    <h2>시스템</h2>
+    <label>주문 도착률 λ<small>orders/hr</small><input id="lam_hr" type="number" value="800" min="1"></label>
+    <label>로봇 수 M<input id="num_robots" type="number" value="14" min="1" max="40"></label>
+    <label>워크스테이션 수 K<input id="num_workstations" type="number" value="3" min="1" max="6"></label>
+    <label>로봇 용량<small>토트</small><input id="robot_capacity" type="number" value="5" min="1" max="10"></label>
+    <label>시뮬레이션 시간<small>s (재생 데이터 크기와 비례)</small><input id="sim_time" type="number" value="3600" min="60" step="600"></label>
+    <label>시드<input id="seed" type="number" value="10000"></label>
+    <label>이동 규칙<select id="traffic"><option value="free">free (모든 방향)</option><option value="lanes">lanes (일방통행)</option></select></label>
+    <label>충돌 처리<select id="motion"><option value="reserve">reserve (경로 예약)</option><option value="reactive">reactive (대기·우회)</option></select></label>
+    <h2>주문 도착 과정</h2>
+    <label>분포<select id="arrival"></select></label>
+    <div id="arrivalParams"></div>
+    <h2>SKU 수요</h2>
+    <label>분포<select id="sku_dist"></select></label>
+    <div id="skuParams"></div>
+    <label>저장 위치<select id="storage"></select></label>
+    <h2>처리 시간 (토트 1개당)</h2>
+    <div id="timeParams"></div>
+    <div style="margin-top:14px"><button class="primary" id="runBtn" type="button">실행</button></div>
+    <div class="warn" id="warn"></div>
+    <div class="note">분포 모형 참고: ABC 수요 곡선과 클래스 기반 저장 (Hausman, Schwarz &amp; Graves, 1976), RMFS 포아송 도착 (Lamballais, Roy &amp; De Koster, 2017), 전자상거래 피크·웨이브 (Boysen, de Koster &amp; Weidinger, 2019). 파라미터 값은 직접 정하세요.</div>
+  </aside>
+
+  <main>
+    <div class="toolbar">
+      <label>히트맵<select id="heat"><option value="">없음</option><option value="occ">점유 (누적)</option><option value="wait">대기 (누적)</option></select></label>
+      <label>경로<select id="paths"><option value="sel">선택 로봇</option><option value="all">전체</option><option value="">없음</option></select></label>
+      <label><input type="checkbox" id="showOrders" checked> 주문 표시</label>
+      <label><input type="checkbox" id="showIds"> 로봇 번호</label>
+      <label><input type="checkbox" id="showGrid" checked> 격자선·좌표</label>
+      <span class="legend">휠: 확대 · 드래그: 이동 · 더블클릭: 전체 보기</span>
+      <div class="legend" id="legend"></div>
+    </div>
+    <div class="mapwrap"><canvas id="map"></canvas><div class="empty" id="empty"><p>왼쪽에서 설정을 고르고 <b>실행</b>을 누르면 로봇 움직임을 재생합니다.<br>프리셋으로 혼잡이 생기는 시나리오를 바로 고를 수 있습니다.</p></div></div>
+    <div class="player">
+      <button type="button" id="playBtn" title="재생/일시정지 (Space)">▶</button>
+      <button type="button" id="stepBack" title="1초 뒤로 (←)">−1s</button>
+      <button type="button" id="stepFwd" title="1초 앞으로 (→)">+1s</button>
+      <select id="speed" title="재생 속도"><option>1</option><option>5</option><option selected>20</option><option>60</option><option>200</option><option>600</option></select><span>×</span>
+      <input type="range" id="slider" min="0" max="0" value="0">
+      <span class="time" id="timeLabel">t = 0 s</span>
+    </div>
+  </main>
+
+  <aside class="right">
+    <h2 style="margin-top:0">로봇 목록 <span style="text-transform:none;letter-spacing:0">(클릭해 선택, 다시 클릭하면 해제)</span></h2>
+    <div class="rlist" id="robotList"></div>
+    <h2>선택한 로봇의 투어</h2>
+    <div class="robotinfo" id="robotInfo">로봇 목록이나 지도에서 로봇을 고르세요</div>
+    <h2>요약 (전체 실행)</h2>
+    <div class="kpis" id="kpis"></div>
+    <h2>시간에 따른 지표</h2>
+    <div class="chartlabel"><span><i style="background:var(--accent)"></i>시스템 내 주문</span><span><i style="background:var(--st-picking)"></i>대기 큐</span></div>
+    <canvas class="chart" id="ch1"></canvas>
+    <div class="chartlabel"><span><i style="background:var(--st-moving)"></i>작업 중 로봇</span><span><i style="background:var(--st-waiting)"></i>대기(막힘) 로봇</span></div>
+    <canvas class="chart" id="ch2"></canvas>
+    <div class="chartlabel"><span><i style="background:var(--fg)"></i>평균 흐름시간 (최근 10분, s)</span></div>
+    <canvas class="chart" id="ch3"></canvas>
+    <div id="rlBox" hidden>
+      <h2>RL 결정 (현재 시각 직전)</h2>
+      <div class="note" id="rlStats"></div>
+      <div id="decisions"></div>
+    </div>
+  </aside>
+</div>
+<script id="embedded-run" type="application/json">null</script>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const ST_COLORS = ["--st-parked", "--st-topark", "--st-moving", "--st-waiting", "--st-picking", "--st-ws"];
+// 로봇 고유 색 (황금각 간격 색상), 상태는 테두리 링과 투명도로 표시
+const robotColor = i => `hsl(${(i * 137.508 + 210) % 360}, ${i % 2 ? 62 : 72}%, ${i % 3 === 0 ? 42 : i % 3 === 1 ? 52 : 36}%)`;
+const ST_RING = [null, null, null, "--st-waiting", "--st-picking", "--st-ws"];
+const ST_LABELS = ["주차", "주차로 이동", "이동", "대기(막힘)", "피킹", "WS 처리"];
+
+// 시나리오 파라미터 정의 (scenario.Scenario 필드와 같은 이름)
+const ARRIVAL_PARAMS = {
+  poisson: [], renewal: [["scv", "간격 변동계수²", "0 일정, <1 규칙적, >1 몰림"]],
+  nhpp_peak: [["peak_mult", "피크 배수", "피크 구간 λ = 배수 × 평균 λ"], ["peak_start", "피크 시작", "시뮬레이션 시간 비율"], ["peak_len", "피크 길이", "비율, 배수×길이 ≤ 1"]],
+  nhpp_sine: [["sine_amp", "진폭 A", "λ(t)=λ(1+A sin(2πt/P))"], ["sine_period", "주기 P", "s"]],
+  batch: [["batch_mean", "평균 묶음 크기", "한 번에 들어오는 주문 수 (웨이브)"], ["batch_fixed", "묶음 크기 고정", "", "check"]],
+};
+const ARRIVAL_NAMES = { poisson: "포아송 (기본)", nhpp_peak: "피크 시간대 (NHPP)", nhpp_sine: "주기 변동 (NHPP)", batch: "묶음/웨이브 도착", renewal: "변동성 조절 (Erlang/초지수)" };
+const SKU_PARAMS = { uniform: [], abc: [["abc_items", "상위 SKU 비율", "예: 0.2"], ["abc_demand", "그 수요 비중", "예: 0.8 → 20/80 법칙"]], zipf: [["zipf_alpha", "Zipf α", "클수록 소수 SKU 집중"]] };
+const SKU_NAMES = { uniform: "균등 (기본)", abc: "ABC 곡선 (Hausman 1976)", zipf: "Zipf" };
+const STORAGE_NAMES = { random: "무작위 (기본)", class_based: "클래스 기반 (인기 SKU를 WS 가까이)" };
+const TIME_NAMES = { fixed: "고정", uniform: "균등", exponential: "지수", lognormal: "로그정규" };
+const PRESETS = {
+  "기본": {},
+  "피크 시간대": { arrival: "nhpp_peak", peak_mult: 2.5, peak_start: 0.3, peak_len: 0.25 },
+  "웨이브 도착": { arrival: "batch", batch_mean: 8 },
+  "인기 SKU 집중": { sku_dist: "abc", abc_items: 0.2, abc_demand: 0.8, storage: "class_based" },
+  "피킹·처리 시간": { pick_time: 3, pick_dist: "lognormal", pick_cv: 0.6, ws_proc_time: 5, ws_proc_dist: "exponential" },
+  "혼잡 스트레스": { arrival: "batch", batch_mean: 6, sku_dist: "abc", storage: "class_based", pick_time: 3, pick_dist: "uniform", ws_proc_time: 5 },
+};
+
+let META = null, RUN = null, TR = null, LAY = null;
+let frames = null, tick = 0, playing = false, selRobot = -1, lastTs = 0, acc = 0;
+let planIdx = [], routeIdx = [], orderLoc = null, bg = null, heatCanvas = null, view = null;
+
+// 설정 화면
+
+function field(id, label, hint, kind, value) {
+  if (kind === "check")
+    return `<label class="check"><input type="checkbox" id="sc_${id}" ${value ? "checked" : ""}> ${label}</label>`;
+  return `<label>${label}${hint ? `<small>${hint}</small>` : ""}<input id="sc_${id}" type="number" step="any" value="${value}"></label>`;
+}
+function renderParams(scen) {
+  const d = Object.assign({}, META.scenario_defaults, scen || {});
+  $("arrivalParams").innerHTML = (ARRIVAL_PARAMS[$("arrival").value] || []).map(p => field(p[0], p[1], p[2], p[3], d[p[0]])).join("");
+  $("skuParams").innerHTML = (SKU_PARAMS[$("sku_dist").value] || []).map(p => field(p[0], p[1], p[2], p[3], d[p[0]])).join("");
+  const tsel = (id, v) => `<select id="sc_${id}">${META.enums[id].map(x => `<option value="${x}" ${x === v ? "selected" : ""}>${TIME_NAMES[x]}</option>`).join("")}</select>`;
+  $("timeParams").innerHTML =
+    `<label>피킹 평균<small>s, 랙에서 토트를 꺼내는 시간</small><input id="sc_pick_time" type="number" step="any" min="0" value="${d.pick_time}"></label>` +
+    `<label>피킹 분포${tsel("pick_dist", d.pick_dist)}</label>` +
+    `<label>피킹 변동계수<small>균등·로그정규에 사용</small><input id="sc_pick_cv" type="number" step="any" min="0" value="${d.pick_cv}"></label>` +
+    `<label>WS 처리 평균<small>s, 토트 1개 처리</small><input id="sc_ws_proc_time" type="number" step="any" min="0" value="${d.ws_proc_time}"></label>` +
+    `<label>WS 처리 분포${tsel("ws_proc_dist", d.ws_proc_dist)}</label>` +
+    `<label>WS 변동계수<input id="sc_ws_proc_cv" type="number" step="any" min="0" value="${d.ws_proc_cv}"></label>`;
+}
+function fillSelect(sel, items, names, value) {
+  sel.innerHTML = items.map(x => `<option value="${x}">${names[x] || x}</option>`).join("");
+  if (value !== undefined) sel.value = value;
+}
+function applyScenario(scen) {
+  const d = Object.assign({}, META.scenario_defaults, scen);
+  $("arrival").value = d.arrival; $("sku_dist").value = d.sku_dist; $("storage").value = d.storage;
+  renderParams(d);
+}
+function collectScenario() {
+  const s = { arrival: $("arrival").value, sku_dist: $("sku_dist").value, storage: $("storage").value };
+  document.querySelectorAll("[id^=sc_]").forEach(el => {
+    const k = el.id.slice(3);
+    s[k] = el.type === "checkbox" ? el.checked : (el.tagName === "SELECT" ? el.value : parseFloat(el.value));
+  });
+  return s;
+}
+function collectConfig() {
+  const c = { policy: $("policy").value, scenario: collectScenario(), traffic: $("traffic").value, motion: $("motion").value };
+  for (const k of ["lam_hr", "num_robots", "num_workstations", "robot_capacity", "sim_time", "seed"]) c[k] = parseFloat($(k).value);
+  if (c.policy === "RL") c.checkpoint = $("ckptPath").value || $("ckptSel").value;
+  return c;
+}
+async function initMeta() {
+  META = await (await fetch("/api/meta")).json();
+  fillSelect($("policy"), Object.keys(META.policies), META.policies, "BL6");
+  fillSelect($("arrival"), META.enums.arrival, ARRIVAL_NAMES);
+  fillSelect($("sku_dist"), META.enums.sku_dist, SKU_NAMES);
+  fillSelect($("storage"), META.enums.storage, STORAGE_NAMES);
+  $("ckptSel").innerHTML = META.checkpoints.length ? META.checkpoints.map(p => `<option>${p}</option>`).join("")
+                                                   : `<option value="">(저장소에 *.pt 없음)</option>`;
+  renderParams({});
+  $("presets").innerHTML = Object.keys(PRESETS).map(n => `<button type="button" data-p="${n}">${n}</button>`).join("");
+  $("presets").onclick = e => { const p = e.target.dataset.p; if (p !== undefined) applyScenario(PRESETS[p]); };
+  $("arrival").onchange = () => renderParams(collectScenario());
+  $("sku_dist").onchange = () => renderParams(collectScenario());
+  $("policy").onchange = () => { $("ckptBox").hidden = $("policy").value !== "RL"; showCkptMeta(); };
+  $("ckptSel").onchange = showCkptMeta; $("ckptPath").onchange = showCkptMeta;
+  $("runBtn").onclick = runSim;
+  // 주소로 바로 실행: #autorun&policy=RL&preset=웨이브 도착&t=900
+  const h = new URLSearchParams(decodeURIComponent(location.hash.slice(1)));
+  if (h.has("policy")) { $("policy").value = h.get("policy"); $("policy").onchange(); }
+  if (h.has("preset") && PRESETS[h.get("preset")]) applyScenario(PRESETS[h.get("preset")]);
+  if (h.has("autorun")) { await runSim(); if (h.has("t") && TR) setTick(Math.round(parseFloat(h.get("t")) / TR.dt)); }
+}
+async function showCkptMeta() {
+  const path = $("ckptPath").value || $("ckptSel").value;
+  if ($("policy").value !== "RL" || !path) { $("ckptMeta").textContent = ""; return; }
+  const r = await (await fetch("/api/checkpoint", { method: "POST", body: JSON.stringify({ path }) })).json();
+  if (r.error) { $("ckptMeta").textContent = r.error; return; }
+  const m = r.meta || {};
+  $("ckptMeta").textContent = m.lam ? `학습: λ=${Math.round(m.lam * 3600)}/hr, M=${m.num_robots}, K=${m.num_workstations}, ` +
+    `${m.grid ? `grid ${m.traffic}/${m.motion}` : "연속 레이아웃"}, ${m.episodes} episodes` : "학습 조건 기록 없음";
+}
+async function runSim() {
+  const btn = $("runBtn");
+  btn.disabled = true; btn.innerHTML = `<span class="spin"></span>시뮬레이션 실행 중…`; $("warn").textContent = "";
+  try {
+    const res = await (await fetch("/api/run", { method: "POST", body: JSON.stringify(collectConfig()) })).json();
+    if (res.error) { $("warn").textContent = res.error; return; }
+    loadRun(res);
+  } catch (e) { $("warn").textContent = "서버에 연결할 수 없습니다: " + e; }
+  finally { btn.disabled = false; btn.textContent = "실행"; }
+}
+
+// 실행 결과 불러오기
+
+function loadRun(res) {
+  RUN = res; TR = res.trace; LAY = res.layout;
+  const bin = atob(TR.frames); frames = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) frames[i] = bin.charCodeAt(i);
+  planIdx = Array.from({ length: TR.M }, () => []); routeIdx = Array.from({ length: TR.M }, () => []);
+  for (const e of TR.plan_ev) planIdx[e[1]].push(e);
+  for (const e of TR.route_ev) routeIdx[e[1]].push(e);
+  orderLoc = TR.orders;
+  const c = res.config;
+  $("runinfo").textContent = `${META ? META.policies[c.policy] : c.policy} · λ=${c.lam_hr}/hr · M=${c.num_robots} · K=${c.num_workstations} · ` +
+    `${c.traffic}/${c.motion} · ${c.scenario.arrival}/${c.scenario.sku_dist}/${c.scenario.storage} · seed ${c.seed}` +
+    (res.git ? ` · git ${res.git}` : "") + (c.checkpoint ? ` · ${c.checkpoint}` : "");
+  if (res.warnings && res.warnings.length) $("warn").textContent = res.warnings.join(" ");
+  if (res.id) { $("exportBtn").href = `/api/export?id=${res.id}`; $("exportBtn").hidden = false; }
+  $("empty").hidden = true;
+  $("slider").max = TR.n_ticks - 1; tick = 0; selRobot = -1;
+  renderKpis(); buildBackground(); buildHeat(); renderLegend(); buildRobotList();
+  $("rlBox").hidden = !(TR.decisions && TR.decisions.length);
+  if (!$("rlBox").hidden) {
+    const agree = TR.decisions.filter(d => d.chosen === d.bl6).length;
+    $("rlStats").textContent = `결정 ${TR.decisions.length}건 · BL6(한계비용 최소)와 같은 로봇 선택 ${(100 * agree / TR.decisions.length).toFixed(1)}%`;
+  }
+  draw();
+}
+function renderKpis() {
+  const s = RUN.summary, f = (v, d = 1) => (v === undefined || v === null) ? "–" : Number(v).toLocaleString(undefined, { maximumFractionDigits: d });
+  const items = [["평균 흐름시간", f(s.avg_flow_time) + " s"], ["평균 대기시간", f(s.avg_wait_time) + " s"],
+    ["완료 / 도착", `${s.n_completed} / ${s.n_arrived}`], ["처리량", f(s.throughput_per_h, 0) + " /h"],
+    ["총 이동거리", f(s.total_distance / 1000, 1) + " km"], ["주문당 거리", f(s.dist_per_order) + " m"],
+    ["막힘 대기 합계", f(s.blocked_time, 0) + " robot·s"], ["트립당 토트", f(s.avg_totes_per_trip, 2)],
+    ["경로계획 실패", f(s.n_plan_fail, 0)], ["실행 시간", f(RUN.wall_s, 1) + " s"]];
+  $("kpis").innerHTML = items.map(([k, v]) => `<div class="kpi"><b>${v}</b><span>${k}</span></div>`).join("");
+}
+function renderLegend() {
+  const ring = c => `<i style="background:var(--panel);border:2.5px solid ${css(c)};box-sizing:border-box"></i>`;
+  $("legend").innerHTML = `<span>색 = 로봇 번호</span><span><i style="background:var(--muted);opacity:.4"></i>주차·대기 중(옅게)</span>` +
+    `<span>${ring("--st-waiting")}막혀서 대기</span><span>${ring("--st-picking")}피킹</span><span>${ring("--st-ws")}WS 처리</span>` +
+    `<span>× 배정된 피킹 위치(로봇 색)</span><span>◆ 미배정 주문</span>`;
+}
+function buildRobotList() {
+  $("robotList").innerHTML = Array.from({ length: TR.M }, (_, i) =>
+    `<button type="button" class="rchip" data-r="${i}"><i style="background:${robotColor(i)}"></i><b>R${i}</b><span id="rl_l${i}"></span><small id="rl_s${i}"></small></button>`).join("");
+}
+function updateRobotList() {
+  for (let i = 0; i < TR.M; i++) {
+    const [, , st, load] = robotAt(tick, i), el = $("robotList").children[i];
+    el.classList.toggle("sel", i === selRobot);
+    $("rl_l" + i).textContent = load ? `${load}토트` : "";
+    $("rl_s" + i).textContent = ST_LABELS[st];
+  }
+}
+
+// 지도 그리기
+
+const ZOOM = { z: 1, px: 0, py: 0 };   // 확대 배율과 이동량 (장치 픽셀)
+function fit() {
+  const cv = $("map"), r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+  // 좌표 눈금 자리로 가장자리에 2칸씩 여유
+  const base = Math.min(cv.width / (LAY.n_cols + 5), cv.height / (LAY.n_rows + 5));
+  const cs = Math.max(2, Math.round(base * ZOOM.z));
+  view = { cs, dpr,
+           ox: Math.floor((cv.width - cs * LAY.n_cols) / 2 + base * 1.2) + ZOOM.px,
+           oy: Math.floor((cv.height - cs * LAY.n_rows) / 2 - base * 0.8) + ZOOM.py };
+}
+const cx = x => view.ox + (x + 0.5) * view.cs;
+const cy = y => view.oy + (LAY.n_rows - 1 - y + 0.5) * view.cs;
+function buildBackground() {
+  fit();
+  bg = document.createElement("canvas"); bg.width = $("map").width; bg.height = $("map").height;
+  const g = bg.getContext("2d"), cs = view.cs, W = LAY.n_cols * cs, Hh = LAY.n_rows * cs;
+  const X = x => view.ox + x * cs, Y = y => view.oy + (LAY.n_rows - 1 - y) * cs;
+  const colors = { 0: css("--rack"), 1: css("--aisle"), 2: css("--cross"), 3: css("--ws") };
+  for (let y = 0; y < LAY.n_rows; y++) for (let x = 0; x < LAY.n_cols; x++) {
+    const k = LAY.kinds[y][x]; if (k < 0) continue;
+    g.fillStyle = colors[k]; g.fillRect(X(x), Y(y), cs, cs);
+  }
+  const paint = (cells, col) => { g.fillStyle = col; for (const [x, y] of cells) g.fillRect(X(x), Y(y), cs, cs); };
+  paint(LAY.pick_cells.map(i => LAY.cells[i]), css("--pick"));
+  LAY.queues.forEach(q => paint(q, css("--queue"))); LAY.spots.forEach(s => paint(s, css("--spot"))); paint(LAY.docks, css("--dock"));
+  if ($("showGrid").checked && cs >= 3) {
+    // 교차통로는 연주황 셀 테두리, 나머지 칸은 옅은 격자선 (5칸마다 조금 진하게). 1칸 = 1 m
+    const strokeCells = (pred, color) => { g.strokeStyle = css(color); g.lineWidth = 1; g.beginPath();
+      for (let y = 0; y < LAY.n_rows; y++) for (let x = 0; x < LAY.n_cols; x++)
+        if (pred(LAY.kinds[y][x])) g.rect(X(x) + .5, Y(y) + .5, cs - 1, cs - 1);
+      g.stroke(); };
+    strokeCells(k => k >= 0 && k !== 2, "--grid");
+    strokeCells(k => k === 2, "--cell-border");
+    g.strokeStyle = css("--grid-major"); g.lineWidth = Math.max(1, view.dpr); g.beginPath();
+    for (let y = 0; y < LAY.n_rows; y++) for (let x = 0; x < LAY.n_cols; x++) {
+      const k = LAY.kinds[y][x]; if (k < 0 || k === 2) continue;
+      if (x % 5 === 0) { g.moveTo(X(x) + .5, Y(y)); g.lineTo(X(x) + .5, Y(y) + cs); }
+      if (y % 5 === 0) { g.moveTo(X(x), Y(y) + cs - .5); g.lineTo(X(x) + cs, Y(y) + cs - .5); }
+    }
+    g.stroke();
+    // 좌표 눈금: 아래쪽 열 번호, 왼쪽 행 번호 (5칸마다)
+    const fs = Math.max(9 * view.dpr, Math.min(cs * .8, 13 * view.dpr));
+    g.fillStyle = css("--muted"); g.font = `${fs}px ${css("--mono")}`;
+    g.textAlign = "center"; g.textBaseline = "top";
+    for (let x = 0; x < LAY.n_cols; x += 5) g.fillText(x, cx(x), view.oy + Hh + 3 * view.dpr);
+    g.textAlign = "right"; g.textBaseline = "middle";
+    for (let y = 0; y < LAY.n_rows; y += 5) g.fillText(y, view.ox - 4 * view.dpr, cy(y));
+  }
+  g.fillStyle = css("--dock"); g.font = `600 ${Math.max(10 * view.dpr, cs * .9)}px ${css("--sans")}`; g.textAlign = "center"; g.textBaseline = "top";
+  LAY.docks.forEach((d, k) => g.fillText(`WS${k + 1}`, cx(d[0]), view.oy + Hh + Math.max(16 * view.dpr, cs * 1.4)));
+}
+function redrawAll() { buildBackground(); buildHeat(); draw(); }
+function buildHeat() {
+  heatCanvas = null; const mode = $("heat").value; if (!mode || !TR) return;
+  const arr = mode === "occ" ? TR.heat_occ : TR.heat_wait, mx = Math.max(1, ...arr);
+  heatCanvas = document.createElement("canvas"); heatCanvas.width = bg.width; heatCanvas.height = bg.height;
+  const g = heatCanvas.getContext("2d"), cs = view.cs;
+  arr.forEach((v, i) => { if (!v) return; const [x, y] = LAY.cells[i], a = Math.log1p(v) / Math.log1p(mx);
+    g.fillStyle = mode === "occ" ? `rgba(47,91,211,${0.08 + 0.75 * a})` : `rgba(224,48,30,${0.1 + 0.8 * a})`;
+    g.fillRect(view.ox + x * cs, view.oy + (LAY.n_rows - 1 - y) * cs, cs, cs); });
+}
+function robotAt(k, i) { const o = (k * TR.M + i) * 4; return [frames[o], frames[o + 1], frames[o + 2], frames[o + 3]]; }
+function lastBefore(list, k, idx = 0) { let lo = 0, hi = list.length - 1, ans = null; while (lo <= hi) { const m = (lo + hi) >> 1; if (list[m][idx] <= k) { ans = list[m]; lo = m + 1; } else hi = m - 1; } return ans; }
+function remainingPlan(i, k) { const p = lastBefore(planIdx[i], k); if (!p) return []; const off = k - p[0]; return off >= p[2].length ? [] : p[2].slice(Math.max(0, off)); }
+function draw() {
+  if (!TR) return;
+  const cv = $("map"), g = cv.getContext("2d"), cs = view.cs, t = tick * TR.dt;
+  g.clearRect(0, 0, cv.width, cv.height); g.drawImage(bg, 0, 0); if (heatCanvas) g.drawImage(heatCanvas, 0, 0);
+  // 미배정 주문
+  if ($("showOrders").checked) {
+    g.fillStyle = css("--st-picking");
+    for (const o of orderLoc) { if (o[1] > t) break; if (o[2] !== null && o[2] <= t) continue; if (o[3] !== null && o[3] <= t) continue;
+      const [x, y] = LAY.cells[o[4]], r = cs * .32; g.beginPath(); g.moveTo(cx(x), cy(y) - r); g.lineTo(cx(x) + r, cy(y)); g.lineTo(cx(x), cy(y) + r); g.lineTo(cx(x) - r, cy(y)); g.fill(); }
+  }
+  // 경로
+  const pm = $("paths").value;
+  for (let i = 0; i < TR.M; i++) {
+    if (!pm || (pm === "sel" && i !== selRobot)) continue;
+    const [x0, y0] = robotAt(tick, i), path = remainingPlan(i, tick);
+    g.strokeStyle = robotColor(i); g.globalAlpha = i === selRobot ? .95 : .45; g.lineWidth = Math.max(1, cs * (i === selRobot ? .24 : .12));
+    g.beginPath(); g.moveTo(cx(x0), cy(y0)); for (const c of path) { const [x, y] = LAY.cells[c]; g.lineTo(cx(x), cy(y)); } g.stroke(); g.globalAlpha = 1;
+  }
+  // 배정된 피킹 위치
+  if ($("showOrders").checked) {
+    g.lineWidth = Math.max(1, cs * .14);
+    for (let i = 0; i < TR.M; i++) { const rv = lastBefore(routeIdx[i], tick); if (!rv) continue;
+      if (selRobot >= 0 && i !== selRobot) g.globalAlpha = .35;
+      g.strokeStyle = robotColor(i); g.lineWidth = Math.max(1, cs * (i === selRobot ? .2 : .14));
+      let n = 0;
+      for (const c of rv[2]) { if (c === rv[3]) continue; n++; const [x, y] = LAY.cells[c], r = cs * .3;
+        g.beginPath(); g.moveTo(cx(x) - r, cy(y) - r); g.lineTo(cx(x) + r, cy(y) + r); g.moveTo(cx(x) + r, cy(y) - r); g.lineTo(cx(x) - r, cy(y) + r); g.stroke();
+        if (i === selRobot) {                        // 방문 순서 번호
+          const fs = Math.max(10 * view.dpr, cs * .8); g.font = `bold ${fs}px ${css("--mono")}`; g.textAlign = "left"; g.textBaseline = "bottom";
+          g.lineWidth = 3 * view.dpr; g.strokeStyle = css("--panel"); g.strokeText(n, cx(x) + r, cy(y) - r);
+          g.fillStyle = robotColor(i); g.fillText(n, cx(x) + r, cy(y) - r); g.strokeStyle = robotColor(i); g.lineWidth = Math.max(1, cs * .2);
+        } }
+      if (i === selRobot) {                          // 복귀 워크스테이션 표시
+        const [x, y] = LAY.cells[rv[3]]; g.strokeStyle = robotColor(i); g.lineWidth = Math.max(2, cs * .2);
+        g.strokeRect(cx(x) - cs * .65, cy(y) - cs * .65, cs * 1.3, cs * 1.3); }
+      g.globalAlpha = 1; }
+  }
+  // 로봇
+  for (let i = 0; i < TR.M; i++) {
+    const [x, y, st, load] = robotAt(tick, i), r = cs * .46;
+    g.globalAlpha = st <= 1 ? .45 : 1;               // 주차·주차로 이동 중이면 옅게
+    g.fillStyle = robotColor(i); g.beginPath(); g.arc(cx(x), cy(y), r, 0, 7); g.fill(); g.globalAlpha = 1;
+    if (ST_RING[st]) { g.lineWidth = Math.max(2, cs * .2); g.strokeStyle = css(ST_RING[st]); g.beginPath(); g.arc(cx(x), cy(y), r + cs * .08, 0, 7); g.stroke(); }
+    else { g.lineWidth = Math.max(1, cs * .06); g.strokeStyle = css("--panel"); g.stroke(); }
+    if (i === selRobot) { g.lineWidth = Math.max(2, cs * .14); g.strokeStyle = css("--fg"); g.beginPath(); g.arc(cx(x), cy(y), r + cs * .3, 0, 7); g.stroke(); }
+    if (load && cs >= 8) { g.fillStyle = "#fff"; g.font = `bold ${Math.round(cs * .55)}px ${css("--mono")}`; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(load, cx(x), cy(y) + 1); }
+    if ($("showIds").checked) { g.fillStyle = css("--fg"); g.font = `${Math.max(9, Math.round(cs * .7))}px ${css("--mono")}`; g.textAlign = "left"; g.textBaseline = "bottom"; g.fillText("R" + i, cx(x) + r, cy(y) - r * .3); }
+  }
+  $("timeLabel").textContent = `t = ${fmtT(t)}  (${tick}/${TR.n_ticks - 1})`;
+  $("slider").value = tick;
+  drawCharts(t); renderRobot(); updateRobotList(); renderDecisions(t);
+}
+const fmtT = s => { s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return `${h}:${String(m).padStart(2, "0")}:${String(x).padStart(2, "0")}`; };
+
+// 차트
+
+function chart(id, series, colors, t) {
+  const cv = $(id), dpr = window.devicePixelRatio || 1, r = cv.getBoundingClientRect();
+  cv.width = r.width * dpr; cv.height = r.height * dpr;
+  const g = cv.getContext("2d"), W = cv.width, H = cv.height, pad = 4 * dpr, ts = TR.metrics.t;
+  const vals = series.flat().filter(v => v !== null), mx = Math.max(1, ...vals), T = ts[ts.length - 1] || 1;
+  g.fillStyle = css("--muted"); g.font = `${10 * dpr}px ${css("--mono")}`; g.textAlign = "left"; g.fillText(Math.round(mx), pad, 11 * dpr);
+  series.forEach((s, j) => { g.strokeStyle = colors[j]; g.lineWidth = 1.4 * dpr; g.beginPath(); let started = false;
+    s.forEach((v, i) => { if (v === null) { started = false; return; } const X = pad + (W - 2 * pad) * ts[i] / T, Y = H - pad - (H - 2 * pad) * v / mx;
+      if (!started) { g.moveTo(X, Y); started = true; } else g.lineTo(X, Y); }); g.stroke(); });
+  const X = pad + (W - 2 * pad) * t / T; g.strokeStyle = css("--muted"); g.lineWidth = dpr; g.setLineDash([3 * dpr, 3 * dpr]);
+  g.beginPath(); g.moveTo(X, 0); g.lineTo(X, H); g.stroke(); g.setLineDash([]);
+}
+function drawCharts(t) {
+  const m = TR.metrics;
+  chart("ch1", [m.in_system, m.queue], [css("--accent"), css("--st-picking")], t);
+  chart("ch2", [m.busy, m.waiting], [css("--st-moving"), css("--st-waiting")], t);
+  chart("ch3", [m.avg_flow], [css("--fg")], t);
+}
+
+// 로봇 상세, RL 결정
+
+function renderRobot() {
+  if (selRobot < 0) { $("robotInfo").textContent = "로봇 목록이나 지도에서 로봇을 고르세요"; return; }
+  const [x, y, st, load] = robotAt(tick, selRobot), rv = lastBefore(routeIdx[selRobot], tick), plan = remainingPlan(selRobot, tick);
+  const visits = rv ? rv[2].filter(c => c !== rv[3]).map((c, j) => `${j + 1}:(${LAY.cells[c]})`).join(" → ") : "";
+  const ws = rv ? LAY.docks.findIndex(d => LAY.cells[rv[3]][0] === d[0] && LAY.cells[rv[3]][1] === d[1]) + 1 : "-";
+  const myOrders = orderLoc.filter(o => o[6] === selRobot && o[2] !== null && o[2] <= tick * TR.dt && (o[3] === null || o[3] > tick * TR.dt));
+  $("robotInfo").textContent = `R${selRobot}  위치 (${x}, ${y})  상태 ${ST_LABELS[st]}\n적재/배정 주문 ${myOrders.length}건 (토트 ${load})\n` +
+    `남은 방문: ${visits || "없음"}${rv && rv[2].length ? ` → WS${ws}` : ""}\n복귀 워크스테이션 WS${ws}\n예약 경로 남은 길이: ${plan.length} 틱`;
+}
+function renderDecisions(t) {
+  if ($("rlBox").hidden) return;
+  const D = TR.decisions; let hi = D.length - 1, lo = 0, end = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (D[m].t <= t) { end = m; lo = m + 1; } else hi = m - 1; }
+  const rows = [];
+  for (let j = end; j >= 0 && j > end - 6; j--) {
+    const d = D[j], same = d.chosen === d.bl6;
+    const tbl = d.cands.map(c => `<tr class="${c.robot === d.chosen ? "sel" : ""}"><td>R${c.robot}${c.idle ? " idle" : ""}</td><td>${c.q}</td><td>${c.dd}</td><td>${c.mc}</td><td>${c.load}</td></tr>`).join("");
+    rows.push(`<div class="dec" data-t="${d.t}"><div class="hd"><span>${fmtT(d.t)} · 주문 #${d.order} @(${LAY.cells[d.loc]})</span>` +
+      `<span class="tag ${same ? "ok" : "diff"}">RL R${d.chosen} / BL6 R${d.bl6}</span></div>` +
+      `<table><tr><th>후보</th><th>Q</th><th>Δd m</th><th>한계비용</th><th>적재</th></tr>${tbl}</table></div>`);
+  }
+  $("decisions").innerHTML = rows.join("") || `<div class="note">아직 결정 없음</div>`;
+}
+
+// 재생
+
+function setTick(k) { tick = Math.max(0, Math.min(TR ? TR.n_ticks - 1 : 0, k)); draw(); }
+function loop(ts) {
+  if (playing && TR) {
+    acc += (ts - lastTs) / 1000 * parseFloat($("speed").value) / TR.dt;
+    const n = Math.floor(acc); if (n > 0) { acc -= n; setTick(tick + n); if (tick >= TR.n_ticks - 1) togglePlay(false); }
+  }
+  lastTs = ts; requestAnimationFrame(loop);
+}
+function togglePlay(on) { playing = on === undefined ? !playing : on; $("playBtn").textContent = playing ? "❚❚" : "▶"; acc = 0; }
+$("playBtn").onclick = () => togglePlay();
+$("stepBack").onclick = () => setTick(tick - 1);
+$("stepFwd").onclick = () => setTick(tick + 1);
+$("slider").oninput = e => setTick(parseInt(e.target.value));
+$("heat").onchange = () => { buildHeat(); draw(); };
+$("showGrid").onchange = () => { if (TR) redrawAll(); };
+for (const id of ["paths", "showOrders", "showIds"]) $(id).onchange = draw;
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (e.code === "Space") { e.preventDefault(); togglePlay(); }
+  else if (e.code === "ArrowRight") setTick(tick + (e.shiftKey ? 60 : 1));
+  else if (e.code === "ArrowLeft") setTick(tick - (e.shiftKey ? 60 : 1));
+  else if (e.code === "Escape") { selRobot = -1; draw(); }
+});
+let drag = null;
+$("map").addEventListener("wheel", e => {
+  if (!TR) return; e.preventDefault();
+  const r = $("map").getBoundingClientRect(), px = (e.clientX - r.left) * view.dpr, py = (e.clientY - r.top) * view.dpr;
+  const gx = (px - view.ox) / view.cs, gy = (py - view.oy) / view.cs;          // 커서 아래 격자 좌표
+  ZOOM.z = Math.min(12, Math.max(1, ZOOM.z * (e.deltaY < 0 ? 1.2 : 1 / 1.2)));
+  ZOOM.px = 0; ZOOM.py = 0; fit();
+  ZOOM.px = Math.round(px - gx * view.cs - view.ox); ZOOM.py = Math.round(py - gy * view.cs - view.oy);
+  redrawAll();
+}, { passive: false });
+$("map").addEventListener("mousedown", e => { drag = { x: e.clientX, y: e.clientY, px: ZOOM.px, py: ZOOM.py, moved: false }; });
+window.addEventListener("mousemove", e => {
+  if (!drag || !TR) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (Math.abs(dx) + Math.abs(dy) > 4) drag.moved = true;
+  if (drag.moved) { ZOOM.px = drag.px + Math.round(dx * view.dpr); ZOOM.py = drag.py + Math.round(dy * view.dpr); redrawAll(); }
+});
+window.addEventListener("mouseup", () => { setTimeout(() => { drag = null; }, 0); });
+$("map").addEventListener("dblclick", () => { ZOOM.z = 1; ZOOM.px = 0; ZOOM.py = 0; if (TR) redrawAll(); });
+$("map").onclick = e => {
+  if (!TR || (drag && drag.moved)) return; const r = $("map").getBoundingClientRect(), px = (e.clientX - r.left) * view.dpr, py = (e.clientY - r.top) * view.dpr;
+  let best = -1, bd = 1e9;
+  for (let i = 0; i < TR.M; i++) { const [x, y] = robotAt(tick, i), d = (cx(x) - px) ** 2 + (cy(y) - py) ** 2; if (d < bd) { bd = d; best = i; } }
+  selRobot = bd < (view.cs * 2.5) ** 2 ? best : -1; draw();
+};
+$("robotList").onclick = e => { const b = e.target.closest(".rchip"); if (!b) return; const i = parseInt(b.dataset.r);
+  selRobot = selRobot === i ? -1 : i; if ($("paths").value === "") $("paths").value = "sel"; draw(); };
+$("decisions").onclick = e => { const el = e.target.closest(".dec"); if (el) { togglePlay(false); setTick(Math.round(parseFloat(el.dataset.t) / TR.dt)); } };
+window.addEventListener("resize", () => { if (TR) { buildBackground(); buildHeat(); draw(); } });
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (TR) { buildBackground(); buildHeat(); renderLegend(); draw(); } });
+
+// 시작: 내보낸 파일이면 내장 기록을 재생, 아니면 서버에서 설정 불러오기
+const embedded = JSON.parse($("embedded-run").textContent);
+if (embedded) {
+  META = { policies: { BL1: "BL1 Full-Buffer", BL2: "BL2 Partial-Buffer", BL3: "BL3 Random", BL4: "BL4 Nearest", BL5: "BL5 Min-Insertion", BL6: "BL6 Marginal-Cost", GR: "Greedy-R", RL: "RL" } };
+  $("cfgPanel").innerHTML = `<h2>내보낸 실행 (읽기 전용)</h2><div class="robotinfo">${JSON.stringify(embedded.config, null, 1).replace(/[{}"]/g, "")}</div>` +
+    `<div class="warn" id="warn">${(embedded.warnings || []).join(" ")}</div>`;
+  embedded.id = null; loadRun(embedded);
+  const m = location.hash.match(/t=(\d+)/);            // 예: replay.html#t=900 → 900초 시점부터
+  const z = location.hash.match(/zoom=([\d.]+)/);
+  if (z) { ZOOM.z = parseFloat(z[1]); redrawAll(); }
+  const rb = location.hash.match(/robot=(\d+)/);       // 예: #robot=3 → R3 선택
+  if (rb) selRobot = parseInt(rb[1]);
+  if (m) setTick(Math.round(parseInt(m[1]) / TR.dt)); else draw();
+} else {
+  initMeta().catch(e => { $("warn").textContent = "서버에서 설정을 불러오지 못했습니다: " + e; });
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
