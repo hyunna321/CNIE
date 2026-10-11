@@ -1,7 +1,7 @@
-"""그리드 시뮬레이션 기록기: 매 틱 로봇 위치/상태, 경로·예약 변경, 주문 수명, 지표, 혼잡 히트맵, RL 결정.
+"""그리드 시뮬레이션 기록기: 매 틱 로봇 위치/상태, 경로·예약 변경, 주문 수명, 지표, 혼잡 히트맵, RL 결정
 
-SimulatorBase.recorder에 붙이면 시뮬레이터가 on_reset / on_tick / on_plan / on_rl_decision을 부른다.
-그리드 모드 전용.
+SimulatorBase.recorder에 붙이면 시뮬레이터가 on_reset / on_tick / on_plan / on_rl_decision을 호출
+그리드 모드 전용
 """
 import base64
 from collections import deque
@@ -18,7 +18,7 @@ METRIC_EVERY = 10   # 틱, 시계열 지표 기록 간격
 
 
 class Recorder:
-    """매 틱 상태를 바이트 배열로 모으고, 끝나면 뷰어용 dict로 묶는다."""
+    """매 틱 상태를 바이트 배열로 모으고, 끝나면 뷰어용 dict로 묶음"""
 
     def __init__(self, record_decisions: bool = True):
         self.record_decisions = record_decisions
@@ -46,7 +46,7 @@ class Recorder:
     # 시뮬레이터 훅
 
     def on_tick(self, sim, k: int):
-        # 아무 일도 없어 건너뛴 틱은 직전 프레임으로 채운다
+        # 아무 일도 없어 건너뛴 틱은 직전 프레임으로 채움
         if k > self.last_k + 1:
             last = self.frames[-self.M * 4:]
             for _ in range(k - self.last_k - 1):
@@ -133,7 +133,7 @@ class Recorder:
             m["avg_flow"].append(sum(f for _, f in rec) / len(rec) if rec else float("nan"))
 
     def result(self, sim) -> dict:
-        """뷰어로 보낼 기록 (위치 프레임은 base64 바이트)."""
+        """뷰어로 보낼 기록 (위치 프레임은 base64 바이트)"""
         L = sim.layout
         orders = [[o.order_id, round(o.arrival_time, 2),
                    None if o.service_start_time is None else round(o.service_start_time, 2),

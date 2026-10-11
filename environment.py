@@ -12,10 +12,10 @@ from constant import (
 
 
 class WarehouseLayout:
-    """블록/통로/선반으로 구성된 창고 레이아웃과 통로 기반 거리 계산.
+    """블록/통로/선반으로 구성된 창고 레이아웃과 통로 기반 거리 계산
 
-    워크스테이션 K개는 창고 하단(y=0)에 폭 방향으로 균등 배치되고,
-    각 저장 위치에는 SKU가 무작위로 할당된다.
+    - 워크스테이션 K개: 창고 하단(y=0)에 폭 방향으로 균등 배치
+    - 각 저장 위치에 SKU 무작위 할당
     """
 
     def __init__(self, seed: int = DEFAULT_SEED,
@@ -68,7 +68,7 @@ class WarehouseLayout:
             self.apply_class_storage()
 
     def _build_workstations(self) -> List[Tuple[float, float]]:
-        """워크스테이션 좌표를 생성한다.
+        """워크스테이션 좌표 생성
 
         출력:
             창고 하단(y=0)에 폭 방향으로 균등 배치된 K개 좌표 리스트
@@ -78,7 +78,7 @@ class WarehouseLayout:
         return [(x, 0.0) for x in xs]
 
     def _build_storage_coords(self):
-        """모든 저장 위치의 좌표와 통로 접근 좌표를 생성한다.
+        """모든 저장 위치의 좌표와 통로 접근 좌표 생성
 
         출력:
             (coords, access)
@@ -104,9 +104,9 @@ class WarehouseLayout:
         return coords, access
 
     def _assign_skus(self) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
-        """저장 위치마다 SKU를 무작위로 할당한다.
+        """저장 위치마다 SKU 무작위 할당
 
-        위치가 하나도 할당되지 않은 SKU는 임의 위치 하나를 추가로 매핑한다.
+        위치가 하나도 할당되지 않은 SKU는 임의 위치 하나를 추가 매핑
 
         출력:
             (loc_to_sku, sku_to_locs)
@@ -131,11 +131,11 @@ class WarehouseLayout:
         return loc_to_sku, sku_to_locs
 
     def apply_class_storage(self):
-        """클래스 기반 저장: 인기 SKU(id가 작은 SKU)를 워크스테이션에서 가까운 위치부터 배정한다.
+        """클래스 기반 저장: 인기 SKU(id가 작은 SKU)를 워크스테이션에서 가까운 위치부터 배정
 
-        위치를 가장 가까운 워크스테이션까지 거리(워크스테이션 -> 위치) 순으로 정렬하고,
-        SKU마다 같은 수의 위치를 순위대로 나눠 준다 (Hausman et al., 1976의 class-based storage를
-        SKU 순위 단위로 세분한 형태).
+        - 위치를 가장 가까운 워크스테이션까지 거리(워크스테이션 -> 위치) 순으로 정렬
+        - SKU마다 같은 수의 위치를 순위대로 분배
+        (Hausman et al., 1976의 class-based storage를 SKU 순위 단위로 세분한 형태)
         """
         n_loc = len(self.access_coords)
         dist  = [min(self.aisle_distance(w, self.access_coords[i]) for w in self.workstations)
@@ -150,7 +150,7 @@ class WarehouseLayout:
             self.sku_to_locs[sku].append(i)
 
     def manhattan(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
-        """두 점의 맨해튼(L1) 거리. 랙 통과를 허용하므로 이동 비용 계산에는 쓰지 않는다.
+        """두 점의 맨해튼(L1) 거리 (랙 통과를 허용하므로 이동 비용 계산에는 미사용)
 
         입력:
             p1, p2: (x, y) 좌표
@@ -161,7 +161,7 @@ class WarehouseLayout:
 
     @staticmethod
     def _band_vert(ya: float, yb: float, lo: float, hi: float) -> float:
-        """교차통로 밴드 [lo, hi]를 경유해 ya에서 yb로 갈 때의 세로 이동거리.
+        """교차통로 밴드 [lo, hi]를 경유해 ya에서 yb로 갈 때의 세로 이동거리
 
         입력:
             ya, yb: 출발/도착 y 좌표
@@ -179,10 +179,10 @@ class WarehouseLayout:
         return abs(ya - yc) + abs(yb - yc)
 
     def aisle_distance(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
-        """통로 그래프 위 최단 이동거리.
+        """통로 그래프 위 최단 이동거리
 
-        같은 세로 통로(x 동일)이면 |Δy|, 다른 통로이면 가장 유리한
-        교차통로 밴드를 경유하는 거리(세로 우회 + |Δx|)를 쓴다.
+        - 같은 세로 통로(x 동일): |Δy|
+        - 다른 통로: 가장 유리한 교차통로 밴드를 경유하는 거리(세로 우회 + |Δx|)
 
         입력:
             p1, p2: (x, y) 좌표
@@ -200,7 +200,7 @@ class WarehouseLayout:
         return best
 
     def sample_order_sku(self, rng: random.Random) -> int:
-        """주문 SKU를 균등 확률로 하나 뽑는다.
+        """주문 SKU 하나를 균등 확률로 추출
 
         입력:
             rng: 난수 생성기
@@ -212,7 +212,7 @@ class WarehouseLayout:
     def find_tote_location(
         self, sku: int, rng: random.Random
     ) -> Tuple[int, Tuple[float, float]]:
-        """SKU가 보관된 위치 중 하나를 무작위로 고른다.
+        """SKU가 보관된 위치 중 하나를 무작위 선택
 
         입력:
             sku: SKU id
@@ -226,12 +226,12 @@ class WarehouseLayout:
 
     @property
     def num_locations(self) -> int:
-        """전체 저장 위치 수."""
+        """전체 저장 위치 수"""
         return len(self.storage_coords)
 
     @property
     def num_skus(self) -> int:
-        """전체 SKU 수."""
+        """전체 SKU 수"""
         return len(self.sku_ids)
 
 
@@ -240,7 +240,7 @@ def nearest_neighbor_route(
     destinations: List[Tuple[float, float]],
     dist_func:    Callable[[Tuple[float, float], Tuple[float, float]], float],
 ) -> List[Tuple[float, float]]:
-    """최근접 이웃(NNH) 방식으로 방문 순서를 정한다.
+    """최근접 이웃(NNH) 방식의 방문 순서 결정
 
     입력:
         start: 출발 좌표
@@ -265,7 +265,7 @@ def route_total_distance(
     end:       Tuple[float, float],
     dist_func: Callable[[Tuple[float, float], Tuple[float, float]], float],
 ) -> float:
-    """start -> route -> end 경로의 총 이동거리.
+    """start -> route -> end 경로의 총 이동거리
 
     입력:
         start: 출발 좌표
@@ -290,7 +290,7 @@ def nearest_workstation(
     workstations: List[Tuple[float, float]],
     dist_func: Callable[[Tuple[float, float], Tuple[float, float]], float],
 ) -> int:
-    """주어진 위치에서 가장 가까운 워크스테이션을 찾는다.
+    """주어진 위치에서 가장 가까운 워크스테이션 탐색
 
     입력:
         loc: 기준 좌표
@@ -308,7 +308,7 @@ def best_workstation_route(
     workstations: List[Tuple[float, float]],
     dist_func: Callable[[Tuple[float, float], Tuple[float, float]], float],
 ) -> Tuple[int, List[Tuple[float, float]], float]:
-    """NNH 경로를 만들고, 총 이동거리가 최소가 되는 복귀 워크스테이션을 고른다.
+    """NNH 경로 생성 후 총 이동거리가 최소가 되는 복귀 워크스테이션 선택
 
     입력:
         start: 출발 좌표
@@ -328,11 +328,10 @@ def best_workstation_route(
 
 
 class Robot:
-    """피킹 로봇의 위치, 남은 경로, 적재 슬롯 상태를 관리한다.
+    """피킹 로봇의 위치, 남은 경로, 적재 슬롯 상태 관리
 
-    workstation / workstation_id는 현재 트립의 복귀 워크스테이션이며,
-    트립을 시작하거나 주문이 삽입될 때마다 총 이동거리가 최소가 되도록
-    다시 정해진다.
+    workstation / workstation_id: 현재 트립의 복귀 워크스테이션
+    (트립 시작 또는 주문 삽입 때마다 총 이동거리가 최소가 되도록 재결정)
     """
 
     def __init__(self, robot_id: int, workstation: Tuple[float, float],
@@ -354,7 +353,7 @@ class Robot:
         self.reset()
 
     def reset(self):
-        """로봇을 워크스테이션에 대기 중인 빈 상태로 되돌린다."""
+        """로봇을 워크스테이션에 대기 중인 빈 상태로 되돌림"""
         self.pos               = self.workstation
         self.route             = []
         self.idle_slots        = self.capacity
@@ -377,7 +376,7 @@ class Robot:
         self.pending_insert    = []          # 계획 실패로 아직 경로에 넣지 못한 삽입 주문 위치
 
     def start_travel(self, now: float):
-        """이동 시작 시각을 기록한다 (이미 이동 중이면 무시).
+        """이동 시작 시각 기록 (이미 이동 중이면 무시)
 
         입력:
             now: 현재 시각 (s)
@@ -386,7 +385,7 @@ class Robot:
             self._travel_start = now
 
     def end_travel(self, now: float):
-        """이동 종료 시 누적 이동시간을 갱신한다.
+        """이동 종료 시 누적 이동시간 갱신
 
         입력:
             now: 현재 시각 (s)
@@ -396,7 +395,7 @@ class Robot:
             self._travel_start = None
 
     def time_to_complete_current(self) -> float:
-        """현재 트립을 마치고 복귀할 때까지 남은 시간.
+        """현재 트립을 마치고 복귀할 때까지 남은 시간
 
         출력:
             남은 이동시간 (s)
@@ -405,7 +404,7 @@ class Robot:
 
     @property
     def remaining_distance(self) -> float:
-        """현재 목적지 -> 남은 경로 -> 복귀 워크스테이션까지 남은 이동거리 (m)."""
+        """현재 목적지 -> 남은 경로 -> 복귀 워크스테이션까지 남은 이동거리 (m)"""
         d = 0.0
         if self.current_dest:
             d += max(0.0, self._md(self.pos, self.current_dest) - self.progress)
@@ -420,7 +419,7 @@ class Robot:
         return d
 
     def arrive_at_node(self) -> bool:
-        """현재 목적지에 도착 처리하고 다음 목적지를 꺼낸다.
+        """현재 목적지 도착 처리 후 다음 목적지 꺼냄
 
         출력:
             남은 경유지가 있어 다음 목적지가 설정되면 True, 없으면 False
@@ -434,7 +433,7 @@ class Robot:
         return False
 
     def redock(self, ws_id: int, layout: WarehouseLayout):
-        """idle 로봇의 복귀 워크스테이션만 바꾼다. 현재 위치(pos)는 그대로 둔다.
+        """idle 로봇의 복귀 워크스테이션만 변경 (현재 위치 pos는 유지)
 
         입력:
             ws_id: 새 워크스테이션 인덱스
@@ -446,9 +445,10 @@ class Robot:
 
     def assign_trip(self, destinations: List[Tuple[float, float]],
                     layout: WarehouseLayout):
-        """현재 위치에서 출발하는 새 트립을 배정하고 이동을 시작한다.
+        """현재 위치에서 출발하는 새 트립 배정 및 이동 시작
 
-        방문 순서는 NNH로 정하고, 복귀 워크스테이션은 총 이동거리가 최소인 곳으로 정한다.
+        - 방문 순서: NNH
+        - 복귀 워크스테이션: 총 이동거리가 최소인 곳
 
         입력:
             destinations: 방문할 좌표 리스트
@@ -466,9 +466,9 @@ class Robot:
 
     def insert_and_reorder(self, loc: Tuple[float, float],
                             layout: WarehouseLayout):
-        """이동 중인 트립에 주문을 삽입하고 남은 경로와 복귀 워크스테이션을 다시 계산한다.
+        """이동 중인 트립에 주문 삽입 후 남은 경로와 복귀 워크스테이션 재계산
 
-        현재 목적지(current_dest)는 바꾸지 않고, 그 이후 경로만 재구성한다.
+        현재 목적지(current_dest)는 유지하고 그 이후 경로만 재구성
 
         입력:
             loc: 삽입할 주문 위치
@@ -489,9 +489,9 @@ class Robot:
                                target_ws_coords: Optional[Tuple[float, float]] = None,
                                dynamic_ws: bool = False,
                                ) -> float:
-        """주문을 이 로봇에 추가했을 때 늘어나는 이동거리를 계산한다.
+        """주문을 이 로봇에 추가했을 때 늘어나는 이동거리
 
-        복귀 지점은 다음 우선순위로 정한다.
+        복귀 지점 결정 우선순위:
           1) target_ws_coords가 주어지면 그 좌표로 고정 (idle 후보 평가용)
           2) dynamic_ws=True이면 주문 포함 후 최적 워크스테이션으로 재탐색
              (insert_and_reorder와 같은 기준, mid-trip 후보 평가용)
@@ -527,7 +527,7 @@ class Robot:
         return after - before
 
     def state_vector(self, max_cap: int, max_time: float = STATE_MAX_TIME) -> np.ndarray:
-        """로봇 상태를 현재 복귀 워크스테이션 기준 상대좌표로 인코딩한다.
+        """로봇 상태를 현재 복귀 워크스테이션 기준 상대좌표로 인코딩
 
         입력:
             max_cap: 로봇 용량 (슬롯/경로 정규화 및 패딩 길이)
@@ -556,7 +556,7 @@ class Robot:
 
     def _remaining_route_dist(self, layout: WarehouseLayout,
                                end: Optional[Tuple[float, float]] = None) -> float:
-        """현재 목적지(없으면 현재 위치)부터 남은 경로를 거쳐 end까지의 거리.
+        """현재 목적지(없으면 현재 위치)부터 남은 경로를 거쳐 end까지의 거리
 
         입력:
             layout: WarehouseLayout
@@ -570,10 +570,10 @@ class Robot:
                                     layout.aisle_distance)
 
     def _start_move(self):
-        """경로의 첫 지점을 현재 목적지로 설정한다."""
+        """경로의 첫 지점을 현재 목적지로 설정"""
         if self.route:
             self.current_dest = self.route.pop(0)
 
     def _md(self, p1, p2):
-        """통로 그래프 거리 (layout.aisle_distance 단축)."""
+        """통로 그래프 거리 (layout.aisle_distance 단축)"""
         return self.layout.aisle_distance(p1, p2)

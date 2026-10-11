@@ -1,14 +1,14 @@
-"""그리드 이동 모드의 시공간 예약표와 우선순위 기반 경로계획 (Prioritized Planning + SIPP).
+"""그리드 이동 모드의 시공간 예약표와 우선순위 기반 경로계획 (Prioritized Planning + SIPP)
 
-로봇의 경로를 "틱 t에 어느 셀"의 목록으로 계획해 예약표에 올린다. 나중에 계획하는
-로봇은 이미 올라간 예약을 피해 경로를 짜므로, 계획 순서가 곧 우선순위다.
+로봇 경로를 "틱 t에 어느 셀"의 목록으로 계획해 예약표에 등록
+나중에 계획하는 로봇은 이미 등록된 예약을 피해 경로를 짜므로 계획 순서가 곧 우선순위
 
 예약 규칙:
-  - 같은 틱에 같은 셀에는 한 로봇만 있을 수 있다 (vertex conflict).
-  - 같은 틱에 두 로봇이 서로 자리를 맞바꿀 수 없다 (swap conflict).
-  - 계획이 끝난 로봇은 마지막 셀에 무기한 머문다 (rest). 그 셀은 이후 누구도 쓸 수 없다.
+  - 같은 틱, 같은 셀에는 한 로봇만 (vertex conflict)
+  - 같은 틱에 두 로봇의 자리 맞바꾸기 금지 (swap conflict)
+  - 계획이 끝난 로봇은 마지막 셀에 무기한 정지 (rest), 이후 그 셀은 누구도 사용 불가
 
-셀은 GridWarehouseLayout.cell_index의 정수 인덱스로 다룬다.
+셀은 GridWarehouseLayout.cell_index의 정수 인덱스로 표현
 """
 import heapq
 from typing import Dict, List, Optional, Tuple
@@ -17,7 +17,7 @@ from constant import RESERVE_HORIZON_EXTRA, RESERVE_MAX_EXPAND
 
 
 class ReservationTable:
-    """(셀, 틱) -> 로봇 예약과 셀별 무기한 점유(rest)를 관리한다."""
+    """(셀, 틱) -> 로봇 예약과 셀별 무기한 점유(rest) 관리"""
 
     def __init__(self):
         self.cell_res: Dict[int, Dict[int, int]] = {}         # 셀 -> {틱: 로봇}
@@ -28,7 +28,7 @@ class ReservationTable:
     # 조회
 
     def owner(self, c: int, t: int) -> Optional[int]:
-        """틱 t에 셀 c를 쓰는 로봇 (없으면 None)."""
+        """틱 t에 셀 c를 쓰는 로봇 (없으면 None)"""
         r = self.cell_res.get(c, {}).get(t)
         if r is not None:
             return r
@@ -38,7 +38,7 @@ class ReservationTable:
         return None
 
     def can_enter(self, u: int, v: int, t: int, rid: int) -> bool:
-        """rid가 틱 t-1의 셀 u에서 틱 t에 셀 v로 갈 수 있는지 (u == v이면 제자리 대기)."""
+        """rid가 틱 t-1의 셀 u에서 틱 t에 셀 v로 갈 수 있는지 (u == v이면 제자리 대기)"""
         o = self.owner(v, t)
         if o is not None and o != rid:
             return False
@@ -50,7 +50,7 @@ class ReservationTable:
         return True
 
     def free_from(self, c: int, t: int, rid: int) -> bool:
-        """셀 c가 틱 t부터 무기한 rid 외에 아무도 쓰지 않는지."""
+        """셀 c가 틱 t부터 무기한 rid 외에 아무도 쓰지 않는지"""
         rs = self.rest.get(c)
         if rs is not None and rs[1] != rid:
             return False
@@ -62,7 +62,7 @@ class ReservationTable:
     # 갱신
 
     def commit(self, rid: int, t0: int, start: int, cells: List[int], rest_cell: int):
-        """rid의 출발 셀(틱 t0), 경로(틱 t0+1부터 cells 순서), 그 뒤 rest_cell 무기한 점유를 예약한다."""
+        """rid의 출발 셀(틱 t0), 경로(틱 t0+1부터 cells 순서), 그 뒤 rest_cell 무기한 점유 예약"""
         lst = self.robot_res.setdefault(rid, [])
         self.cell_res.setdefault(start, {})[t0] = rid
         lst.append((start, t0))
@@ -75,12 +75,12 @@ class ReservationTable:
         self.robot_rest[rid] = (rest_cell, t_rest)
 
     def set_rest(self, rid: int, c: int, t: int):
-        """rid가 틱 t부터 셀 c에 무기한 머문다 (초기 배치용)."""
+        """rid의 틱 t부터 셀 c 무기한 점유 설정 (초기 배치용)"""
         self.rest[c] = (t, rid)
         self.robot_rest[rid] = (c, t)
 
     def clear_after(self, rid: int, t: int) -> Tuple[List[Tuple[int, int]], Optional[Tuple[int, int]]]:
-        """rid의 틱 t 이후 예약과 rest를 지우고, 되돌리기용으로 지운 내용을 돌려준다."""
+        """rid의 틱 t 이후 예약과 rest를 지우고 지운 내용 반환 (되돌리기용)"""
         keep, removed = [], []
         for c, tt in self.robot_res.get(rid, []):
             if tt > t:
@@ -97,7 +97,7 @@ class ReservationTable:
         return removed, rest
 
     def restore(self, rid: int, removed: List[Tuple[int, int]], rest: Optional[Tuple[int, int]]):
-        """clear_after로 지운 예약을 되돌린다."""
+        """clear_after로 지운 예약 복원"""
         lst = self.robot_res.setdefault(rid, [])
         for c, t in removed:
             self.cell_res.setdefault(c, {})[t] = rid
@@ -107,7 +107,7 @@ class ReservationTable:
             self.robot_rest[rid] = rest
 
     def prune(self, t: int):
-        """틱 t 이전 예약을 지워 메모리를 정리한다."""
+        """틱 t 이전 예약 삭제 (메모리 정리)"""
         for c in list(self.cell_res):
             d = self.cell_res[c]
             for tt in [tt for tt in d if tt < t]:
@@ -122,7 +122,7 @@ INF = float("inf")
 
 
 def _safe_intervals(table: ReservationTable, c: int, t_lo: int, rid: int) -> List[Tuple[int, float]]:
-    """셀 c가 틱 t_lo 이후 rid 외 로봇에게 점유되지 않는 최대 연속 구간 [s, e] 목록 (e는 inf 가능)."""
+    """셀 c가 틱 t_lo 이후 rid 외 로봇에게 점유되지 않는 최대 연속 구간 [s, e] 목록 (e는 inf 가능)"""
     occ = sorted(t for t, r in table.cell_res.get(c, {}).items() if t >= t_lo and r != rid)
     rs = table.rest.get(c)
     rest_t = max(rs[0], t_lo) if (rs is not None and rs[1] != rid) else INF
@@ -141,13 +141,12 @@ def _safe_intervals(table: ReservationTable, c: int, t_lo: int, rid: int) -> Lis
 def plan_leg(table: ReservationTable, out_nbrs: List[List[int]], h: List[int],
              rid: int, start: int, t0: int, goal: int, dwell: int,
              final: bool) -> Optional[Tuple[List[int], int]]:
-    """SIPP(Safe Interval Path Planning)로 start(틱 t0) -> goal 구간 경로를 찾는다.
+    """SIPP(Safe Interval Path Planning)로 start(틱 t0) -> goal 구간 경로 탐색
 
-    상태를 (셀, 그 셀이 비어 있는 시간 구간)으로 잡아, 기다림이 길어도 상태 수가 늘지 않는다.
-    각 상태에는 가장 이른 도착 틱을 기록하고, 이동 시 다음 셀의 안전 구간에 맞춰 출발 셀에서
-    기다린다. goal에 도착한 틱 ta부터 ta + dwell까지 goal에 머물 수 있어야 하고, final이면
-    도착 이후 무기한 머물 수 있어야 한다. 셀에 들어서는 순간이 도착이므로 경로는 도중에
-    goal을 지나지 않는다.
+    - 상태 = (셀, 그 셀이 비어 있는 시간 구간)이라 기다림이 길어도 상태 수가 늘지 않음
+    - 각 상태에 가장 이른 도착 틱을 기록, 이동 시 다음 셀의 안전 구간에 맞춰 출발 셀에서 대기
+    - goal 도착 틱 ta부터 ta + dwell까지 goal에 머물 수 있어야 함 (final이면 도착 이후 무기한)
+    - 셀에 들어서는 순간이 도착이므로 경로는 도중에 goal을 지나지 않음
 
     입력:
         table: 예약표
@@ -208,10 +207,10 @@ def plan_leg(table: ReservationTable, out_nbrs: List[List[int]], h: List[int],
             for vi, (vs, ve) in enumerate(intervals(v)):
                 ta = max(t + 1, vs)
                 if ta > c_end + 1 or ta > t_max:
-                    break                           # 구간은 시간 순이라 뒤 구간은 더 늦다
+                    break                           # 구간은 시간 순이라 뒤 구간은 더 늦음
                 if ta > ve:
                     continue
-                # 맞바꾸기 금지: 다른 로봇이 ta-1에 v, ta에 c에 있으면 한 틱 늦춘다
+                # 맞바꾸기 금지: 다른 로봇이 ta-1에 v, ta에 c에 있으면 한 틱 늦춤
                 while ta <= ve and ta <= c_end + 1:
                     o = cell_res.get(v, {}).get(ta - 1)
                     if o is None or o == rid or cell_res.get(c, {}).get(ta) != o:
@@ -220,7 +219,7 @@ def plan_leg(table: ReservationTable, out_nbrs: List[List[int]], h: List[int],
                 if ta > ve or ta > c_end + 1:
                     continue
                 if v == goal and (ve != INF if final else ve < ta + dwell):
-                    continue                        # goal은 머물 수 있는 구간에만 들어간다
+                    continue                        # goal은 머물 수 있는 구간에만 진입
                 key = (v, vi)
                 if ta < best.get(key, INF):
                     best[key] = ta
@@ -230,7 +229,7 @@ def plan_leg(table: ReservationTable, out_nbrs: List[List[int]], h: List[int],
 
 
 def _can_stay(table: ReservationTable, rid: int, c: int, ta: int, dwell: int, final: bool) -> bool:
-    """틱 ta에 셀 c에 도착한 뒤 dwell틱 (final이면 무기한) 머물 수 있는지."""
+    """틱 ta에 셀 c에 도착한 뒤 dwell틱 (final이면 무기한) 머물 수 있는지"""
     for t in range(ta + 1, ta + dwell + 1):
         if not table.can_enter(c, c, t, rid):
             return False

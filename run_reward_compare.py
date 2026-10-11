@@ -1,7 +1,7 @@
 """보상 정식화 비교 실험: legacy 보상 RL vs SMDP 보상 RL vs BL1~BL6.
 
-조건(setting) 하나와 RL 학습 방식(arm) 하나를 받아 학습/평가하고 CSV로 저장한다.
-조건별, arm별로 별도 프로세스로 병렬 실행하는 것을 전제로 한다.
+조건(setting) 하나와 RL 학습 방식(arm) 하나를 받아 학습/평가 후 CSV로 저장
+조건별, arm별 별도 프로세스 병렬 실행 전제
 
 사용법:
     python run_reward_compare.py --robots 14 --lam 800 --arm legacy
@@ -49,7 +49,7 @@ SUMMARY_METRICS = ["avg_flow_time", "dist_per_order", "avg_totes_per_trip",
 
 
 def run_arm(num_robots: int, lam_hr: int, arm: str, total_episodes: int, n_eval: int):
-    """조건 하나에서 arm 하나를 실행해 setting 디렉터리에 저장한다.
+    """조건 하나에서 arm 하나를 실행해 setting 디렉터리에 저장
 
     입력:
         num_robots: 로봇 수
@@ -75,7 +75,7 @@ def run_arm(num_robots: int, lam_hr: int, arm: str, total_episodes: int, n_eval:
             sim.run()
             eval_store.add(sim.build_result("Greedy_R", i, lam))
     elif arm == "baselines":
-        # RL 자리는 학습 없는 에이전트로 채우지 않도록 baselines 전용 경로를 쓴다.
+        # RL 자리를 학습 없는 에이전트로 채우지 않도록 baselines 전용 경로 사용
         agent = DQNAgent(num_robots=num_robots, robot_capacity=ROBOT_CAPACITY,
                          seed=DEFAULT_SEED, sim_time=SIM_TIME,
                          num_workstations=NUM_WORKSTATIONS)
@@ -125,7 +125,7 @@ def _paired_t(a, b):
 
 
 def summarize():
-    """setting마다 eval_*.csv를 합쳐 정책별 평균과 BL6 대비 대응표본 검정을 출력/저장한다."""
+    """setting마다 eval_*.csv를 합쳐 정책별 평균과 BL6 대비 대응표본 검정 출력/저장"""
     rows_out = []
     for setting_dir in sorted(glob.glob(os.path.join(OUT_DIR, "M*_lam*"))):
         by_label = defaultdict(dict)
@@ -163,7 +163,7 @@ def summarize():
 
 
 def main():
-    """명령행 인자로 arm 하나를 실행하거나 결과를 요약한다."""
+    """명령행 인자로 arm 하나 실행 또는 결과 요약"""
     parser = argparse.ArgumentParser(description="Reward formulation comparison")
     parser.add_argument("--robots", type=int, default=14)
     parser.add_argument("--lam", type=int, default=800, help="orders/hr")

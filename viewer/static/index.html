@@ -190,7 +190,7 @@ tr.sel td { font-weight: 700; }
 const $ = id => document.getElementById(id);
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const ST_COLORS = ["--st-parked", "--st-topark", "--st-moving", "--st-waiting", "--st-picking", "--st-ws"];
-// 로봇 고유 색 (황금각 간격 색상). 상태는 테두리 링과 투명도로 표시한다.
+// 로봇 고유 색 (황금각 간격 색상), 상태는 테두리 링과 투명도로 표시
 const robotColor = i => `hsl(${(i * 137.508 + 210) % 360}, ${i % 2 ? 62 : 72}%, ${i % 3 === 0 ? 42 : i % 3 === 1 ? 52 : 36}%)`;
 const ST_RING = [null, null, null, "--st-waiting", "--st-picking", "--st-ws"];
 const ST_LABELS = ["주차", "주차로 이동", "이동", "대기(막힘)", "피킹", "WS 처리"];
@@ -365,7 +365,7 @@ const ZOOM = { z: 1, px: 0, py: 0 };   // 확대 배율과 이동량 (장치 픽
 function fit() {
   const cv = $("map"), r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
   cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
-  // 좌표 눈금 자리로 가장자리에 2칸씩 여유를 둔다
+  // 좌표 눈금 자리로 가장자리에 2칸씩 여유
   const base = Math.min(cv.width / (LAY.n_cols + 5), cv.height / (LAY.n_rows + 5));
   const cs = Math.max(2, Math.round(base * ZOOM.z));
   view = { cs, dpr,

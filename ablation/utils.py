@@ -22,7 +22,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 
 def load_config(path: str = "config.json") -> Dict[str, Any]:
-    """JSON 설정 파일을 읽어 DEFAULT_CONFIG 위에 덮어쓴다.
+    """JSON 설정 파일을 읽어 DEFAULT_CONFIG 위에 덮어씀
 
     입력:
         path: 설정 파일 경로

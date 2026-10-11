@@ -1,4 +1,4 @@
-"""논문용 그래프 생성.
+"""논문용 그래프 생성
 
 - 학습 보상 수렴 곡선: training_curves_all_lambdas.csv -> fig/reward_convergence.pdf/.png
 - λ별 평균 체류시간 / 총 이동거리 막대그래프: eval_all_lambdas.csv
@@ -41,7 +41,7 @@ LAM_MAP = {hr / 3600: hr for hr in PLOT_LAM_VALUES}
 
 
 def _style_axes(ax):
-    """위/오른쪽 테두리를 숨긴다.
+    """위/오른쪽 테두리 숨김
 
     입력:
         ax: matplotlib Axes
@@ -51,7 +51,7 @@ def _style_axes(ax):
 
 
 def _save(fig, out_pdf: str, out_png: str):
-    """그림을 PDF와 PNG로 저장하고 닫는다.
+    """그림을 PDF와 PNG로 저장 후 닫음
 
     입력:
         fig: matplotlib Figure
@@ -67,7 +67,7 @@ def _save(fig, out_pdf: str, out_png: str):
 # 학습 보상 수렴 곡선
 
 def load_training_curves(path: str):
-    """학습 곡선 CSV를 λ별로 묶어 읽는다. λ는 label("RL_lam{λ}_train")에서 추출한다.
+    """학습 곡선 CSV를 λ별로 묶어 읽음 (λ는 label("RL_lam{λ}_train")에서 추출)
 
     입력:
         path: CSV 경로
@@ -86,7 +86,7 @@ def load_training_curves(path: str):
 
 
 def rolling_mean(x, window: int = REWARD_PLOT_SMOOTH_WINDOW):
-    """이동평균 (valid 구간만).
+    """이동평균 (valid 구간만)
 
     입력:
         x: 1차원 수열
@@ -100,7 +100,7 @@ def rolling_mean(x, window: int = REWARD_PLOT_SMOOTH_WINDOW):
 
 
 def plot_reward_convergence(data, out_pdf=REWARD_PLOT_OUT_PDF, out_png=REWARD_PLOT_OUT_PNG):
-    """λ별 원본 보상(흐리게)과 이동평균 곡선을 한 그림에 그려 PDF/PNG로 저장한다.
+    """λ별 원본 보상(흐리게)과 이동평균 곡선을 한 그림에 그려 PDF/PNG로 저장
 
     입력:
         data: load_training_curves 결과
@@ -132,7 +132,7 @@ def plot_reward_convergence(data, out_pdf=REWARD_PLOT_OUT_PDF, out_png=REWARD_PL
 
 
 def plot_reward_figures(csv_path: str = REWARD_PLOT_CSV_PATH):
-    """학습 곡선 CSV를 읽어 보상 수렴 곡선을 저장한다.
+    """학습 곡선 CSV를 읽어 보상 수렴 곡선 저장
 
     입력:
         csv_path: 학습 곡선 CSV 경로
@@ -145,7 +145,7 @@ def plot_reward_figures(csv_path: str = REWARD_PLOT_CSV_PATH):
 # λ별 정책 비교 막대그래프
 
 def _match_lambda(lam_str: str) -> int:
-    """CSV의 λ(orders/s) 문자열을 가장 가까운 그리드 값(orders/hr)으로 바꾼다.
+    """CSV의 λ(orders/s) 문자열을 가장 가까운 그리드 값(orders/hr)으로 변환
 
     입력:
         lam_str: λ 문자열
@@ -158,7 +158,7 @@ def _match_lambda(lam_str: str) -> int:
 
 
 def load_eval_results(path: str):
-    """평가 CSV를 (정책, λ)별로 묶어 읽는다.
+    """평가 CSV를 (정책, λ)별로 묶어 읽음
 
     입력:
         path: CSV 경로
@@ -176,7 +176,7 @@ def load_eval_results(path: str):
 
 
 def compute_stats(agg, field: str, scale: float = 1.0):
-    """(정책, λ)별 지표의 평균과 [min, max] 오차 막대 길이를 계산한다.
+    """(정책, λ)별 지표의 평균과 [min, max] 오차 막대 길이 계산
 
     입력:
         agg: load_eval_results 결과
@@ -201,9 +201,9 @@ def compute_stats(agg, field: str, scale: float = 1.0):
 
 
 def plot_grouped_bars(stats, ylabel: str, out_pdf: str, out_png: str, legend_loc: str = "upper right"):
-    """λ를 그룹, 정책을 막대로 하는 묶음 막대그래프를 그려 PDF/PNG로 저장한다.
+    """λ를 그룹, 정책을 막대로 하는 묶음 막대그래프를 그려 PDF/PNG로 저장
 
-    오차 막대는 평가 인스턴스(시드)들의 [min, max] 범위다.
+    오차 막대: 평가 인스턴스(시드)들의 [min, max] 범위
 
     입력:
         stats: compute_stats 결과
@@ -242,7 +242,7 @@ def plot_grouped_bars(stats, ylabel: str, out_pdf: str, out_png: str, legend_loc
 
 
 def plot_metric_figures(csv_path: str = METRIC_PLOT_CSV_PATH):
-    """평가 CSV를 읽어 평균 체류시간 / 총 이동거리(km) 막대그래프를 저장한다.
+    """평가 CSV를 읽어 평균 체류시간 / 총 이동거리(km) 막대그래프 저장
 
     입력:
         csv_path: 평가 결과 CSV 경로
@@ -273,7 +273,7 @@ def plot_metric_figures(csv_path: str = METRIC_PLOT_CSV_PATH):
 
 
 def main():
-    """명령행 인자에 따라 그래프를 생성한다 (reward / metrics / all)."""
+    """명령행 인자에 따라 그래프 생성 (reward / metrics / all)"""
     parser = argparse.ArgumentParser(description="Generate paper figures")
     parser.add_argument("which", nargs="?", default="all",
                         choices=["all", "reward", "metrics"])

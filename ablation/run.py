@@ -25,7 +25,7 @@ from constant import (
 
 @dataclass
 class TrainingPoint:
-    """학습 곡선의 에피소드 1개 지점."""
+    """학습 곡선의 에피소드 1개 지점"""
     label:         str
     episode:       int
     reward:        float
@@ -36,13 +36,13 @@ class TrainingPoint:
 
 
 class TrainingCurveStore:
-    """학습 곡선 지점(TrainingPoint)을 모아 CSV로 저장한다."""
+    """학습 곡선 지점(TrainingPoint) 수집 및 CSV 저장"""
 
     def __init__(self):
         self.records: List[TrainingPoint] = []
 
     def add(self, p: TrainingPoint):
-        """지점 1개를 추가한다.
+        """지점 1개 추가
 
         입력:
             p: 추가할 TrainingPoint
@@ -50,7 +50,7 @@ class TrainingCurveStore:
         self.records.append(p)
 
     def save_csv(self, path: str):
-        """전체 지점을 CSV로 저장한다.
+        """전체 지점을 CSV로 저장
 
         입력:
             path: 저장 경로 (상위 디렉터리는 자동 생성)
@@ -83,7 +83,7 @@ def compute_reward(
     alpha_idle:     float = REWARD_ALPHA_IDLE,
     beta_depletion: float = REWARD_BETA_DEPLETION,
 ) -> float:
-    """주문 배정 1건의 보상을 계산한다.
+    """주문 배정 1건의 보상 계산
 
     보상 = exp(-alpha · detour / D_MAX)
            − gamma_q · 큐 압박
@@ -127,14 +127,14 @@ def compute_reward(
 # 시뮬레이터
 
 class SimulatorBase:
-    """이산 사건 기반 창고 시뮬레이터의 공통 부분.
+    """이산 사건 기반 창고 시뮬레이터의 공통 부분
 
-    - 로봇 풀은 모든 워크스테이션이 공유하며, 초기 위치만 라운드로빈으로 분산한다.
-    - 대기 주문은 단일 FIFO 큐(OrderManager.wait_queue)로 관리한다.
+    - 로봇 풀은 모든 워크스테이션이 공유, 초기 위치만 라운드로빈으로 분산
+    - 대기 주문은 단일 FIFO 큐(OrderManager.wait_queue)로 관리
     - 트립 시작/주문 삽입 때마다 총 이동거리가 최소가 되는 복귀
-      워크스테이션을 다시 정한다 (environment.best_workstation_route).
+      워크스테이션 재설정 (environment.best_workstation_route)
 
-    하위 클래스는 reset()과 run()을 구현하고, 주문 도착 시 배정 정책을 정의한다.
+    하위 클래스에서 reset()과 run() 구현 및 주문 도착 시 배정 정책 정의
     """
 
     def __init__(self, layout: WarehouseLayout, lam: float, seed: int,
@@ -169,7 +169,7 @@ class SimulatorBase:
         self._extra_travel:          float                  = 0.0
 
     def _build_robots(self) -> List[Robot]:
-        """로봇을 생성하고 워크스테이션에 라운드로빈으로 초기 배치한다.
+        """로봇 생성 후 워크스테이션에 라운드로빈으로 초기 배치
 
         출력:
             Robot 리스트
@@ -184,7 +184,7 @@ class SimulatorBase:
         return robots
 
     def _reset_common(self, seed: int):
-        """에피소드 공통 상태와 로봇을 초기화하고 첫 주문 도착 사건을 넣는다.
+        """에피소드 공통 상태와 로봇 초기화, 첫 주문 도착 사건 추가
 
         입력:
             seed: 주문 생성 난수 시드
@@ -204,7 +204,7 @@ class SimulatorBase:
         self.eq.push(Event(t0, EVENT_ORDER_ARRIVAL))
 
     def _record_service_start(self, order: Order, t: float):
-        """주문의 로봇 배정 시각을 기록한다.
+        """주문의 로봇 배정 시각 기록
 
         입력:
             order: 대상 주문
@@ -213,10 +213,11 @@ class SimulatorBase:
         self.order_mgr.record_service_start(order, t)
 
     def _handle_node_arrival(self, ev: Event):
-        """로봇이 경유지에 도착했을 때 다음 이동 또는 트립 종료를 처리한다.
+        """로봇이 경유지에 도착했을 때 다음 이동 또는 트립 종료 처리
 
-        남은 경유지가 있으면 다음 지점으로, 없으면 복귀 워크스테이션으로 보내고,
-        이미 워크스테이션에 도착했으면 트립 완료 사건을 넣는다.
+        - 남은 경유지가 있으면 다음 지점으로 이동
+        - 없으면 복귀 워크스테이션으로 이동
+        - 이미 워크스테이션에 도착했으면 트립 완료 사건 추가
 
         입력:
             ev: EVENT_NODE_ARRIVAL 사건 (data["robot_id"])
@@ -236,7 +237,7 @@ class SimulatorBase:
             self._schedule_next(robot)
 
     def _complete_trip(self, robot: Robot):
-        """트립을 마친 로봇을 idle로 되돌리고 실었던 주문을 완료 처리한다.
+        """트립을 마친 로봇을 idle로 되돌리고 실었던 주문 완료 처리
 
         입력:
             robot: 트립을 마친 로봇
@@ -254,7 +255,7 @@ class SimulatorBase:
         self._robot_orders[robot.id]  = []
 
     def _schedule_next(self, robot: Robot):
-        """현재 목적지까지 이동을 시작하고 도착 사건을 예약한다. 이동거리도 누적한다.
+        """현재 목적지까지 이동 시작 및 도착 사건 예약. 이동거리도 누적
 
         입력:
             robot: 이동할 로봇
@@ -270,7 +271,7 @@ class SimulatorBase:
                            {"robot_id": robot.id, "dest": robot.current_dest}))
 
     def _dispatch(self, robot: Robot, orders: List[Order]):
-        """대기 큐에서 꺼낸 주문들로 로봇의 새 트립을 시작한다.
+        """대기 큐에서 꺼낸 주문들로 로봇의 새 트립 시작
 
         입력:
             robot: idle 로봇
@@ -288,11 +289,11 @@ class SimulatorBase:
         return self._total_sim_distance / n if n > 0 else 0.0
 
     def avg_totes_per_trip(self) -> float:
-        """트립당 평균 완료 주문 수."""
+        """트립당 평균 완료 주문 수"""
         return self.order_mgr.completed_count() / max(1, self._total_trips)
 
     def saving_per_insertion(self) -> float:
-        """mid-trip 삽입 1건당 절감 이동거리 (m) = 단독 왕복거리 − 삽입당 추가 이동거리.
+        """mid-trip 삽입 1건당 절감 이동거리 (m) = 단독 왕복거리 − 삽입당 추가 이동거리
 
         출력:
             절감 이동거리, 삽입이 없으면 0.0
@@ -304,7 +305,7 @@ class SimulatorBase:
 
     def build_result(self, label: str, episode: int, lam: float,
                      reward: float = 0.0, epsilon: float = 0.0) -> EpisodeResult:
-        """현재 에피소드 지표를 EpisodeResult로 묶는다.
+        """현재 에피소드 지표를 EpisodeResult로 묶음
 
         입력:
             label: 정책 라벨
@@ -336,11 +337,11 @@ class SimulatorBase:
 
 
 class RLSimulator(SimulatorBase):
-    """DQNAgent가 주문마다 배정할 로봇을 고르는 시뮬레이터.
+    """DQNAgent가 주문마다 배정할 로봇을 고르는 시뮬레이터
 
-    후보는 빈 슬롯이 있는 모든 로봇(idle + mid-trip)이고, 행동은 후보 리스트
-    내 인덱스다. 한 결정의 전이는 다음 결정 시점의 후보 특징이 나와야
-    완성되므로 직전 결정을 _pending에 보관해 둔다.
+    - 후보: 빈 슬롯이 있는 모든 로봇(idle + mid-trip)
+    - 행동: 후보 리스트 내 인덱스
+    - 한 결정의 전이는 다음 결정 시점의 후보 특징이 나와야 완성되므로 직전 결정을 _pending에 보관
     """
 
     def __init__(self, layout: WarehouseLayout, agent: DQNAgent,
@@ -368,7 +369,7 @@ class RLSimulator(SimulatorBase):
         self._pending: Optional[Tuple[np.ndarray, float]] = None
 
     def reset(self, seed: int):
-        """에피소드 상태, 누적 보상, 보류 전이를 초기화한다.
+        """에피소드 상태, 누적 보상, 보류 전이 초기화
 
         입력:
             seed: 주문 생성 난수 시드
@@ -378,7 +379,7 @@ class RLSimulator(SimulatorBase):
         self._pending = None
 
     def run(self) -> List[tuple]:
-        """에피소드 1회를 끝까지 실행한다.
+        """에피소드 1회를 끝까지 실행
 
         출력:
             학습용 전이 리스트 [(feat, reward, next_feats, done), ...]
@@ -406,7 +407,7 @@ class RLSimulator(SimulatorBase):
             elif ev.etype == EVENT_TRIP_COMPLETE:
                 self._handle_trip_complete(ev)
 
-        # 마지막 결정은 다음 상태가 없으므로 done=True로 마감한다.
+        # 마지막 결정은 다음 상태가 없으므로 done=True로 마감
         if not self.eval_mode and self._pending is not None:
             feat, r = self._pending
             transitions.append((feat, r, None, True))
@@ -417,9 +418,9 @@ class RLSimulator(SimulatorBase):
         return transitions
 
     def _handle_order_arrival(self, ev: Event) -> Optional[tuple]:
-        """새 주문을 에이전트가 고른 로봇에 배정하고 보상을 계산한다.
+        """새 주문을 에이전트가 고른 로봇에 배정하고 보상 계산
 
-        후보가 없으면 주문을 대기 큐에 넣는다.
+        후보가 없으면 주문을 대기 큐에 넣음
 
         입력:
             ev: EVENT_ORDER_ARRIVAL 사건
@@ -461,7 +462,7 @@ class RLSimulator(SimulatorBase):
         chosen_feat  = cand_feats[idx]
         was_idle     = robot.is_idle
 
-        # 배정 전 상태 기준으로 detour를 측정한다 (보상 및 extra_travel 집계용).
+        # 배정 전 상태 기준 detour 측정 (보상 및 extra_travel 집계용)
         delta_d = robot.delta_distance_insert(
             order.loc, self.layout,
             target_ws_coords=(target_coords if was_idle else None),
@@ -493,7 +494,7 @@ class RLSimulator(SimulatorBase):
         if self.eval_mode:
             return None
 
-        # 직전 결정을 지금의 후보 특징으로 완성하고, 이번 결정은 보류한다.
+        # 직전 결정을 지금의 후보 특징으로 완성, 이번 결정은 보류
         completed = None
         if self._pending is not None:
             feat_prev, r_prev = self._pending
@@ -502,7 +503,7 @@ class RLSimulator(SimulatorBase):
         return completed
 
     def _handle_trip_complete(self, ev: Event):
-        """트립 완료 처리 후, 대기 주문이 있으면 최대 용량만큼 꺼내 새 트립을 시작한다.
+        """트립 완료 처리 후 대기 주문이 있으면 최대 용량만큼 꺼내 새 트립 시작
 
         입력:
             ev: EVENT_TRIP_COMPLETE 사건 (data["robot_id"])
@@ -515,14 +516,14 @@ class RLSimulator(SimulatorBase):
 
 
 class BaselineSimulator(SimulatorBase):
-    """BL1 Full-Buffer: idle 로봇의 슬롯이 모두 찬 뒤에 출발한다. mid-trip 삽입 없음.
+    """BL1 Full-Buffer: idle 로봇의 슬롯이 모두 찬 뒤에 출발. mid-trip 삽입 없음
 
-    주문은 빈 슬롯이 가장 많은 idle 로봇에 쌓이고, 출발 시점에 모인 목적지
-    전체 기준으로 복귀 워크스테이션이 정해진다.
+    주문은 빈 슬롯이 가장 많은 idle 로봇에 적재
+    복귀 워크스테이션은 출발 시점에 모인 목적지 전체 기준으로 결정
     """
 
     def reset(self, seed: int):
-        """에피소드 상태를 초기화한다.
+        """에피소드 상태 초기화
 
         입력:
             seed: 주문 생성 난수 시드
@@ -530,7 +531,7 @@ class BaselineSimulator(SimulatorBase):
         self._reset_common(seed)
 
     def run(self):
-        """에피소드 1회를 끝까지 실행한다."""
+        """에피소드 1회를 끝까지 실행"""
         while self.eq:
             ev = self.eq.pop()
             if ev.time > self.sim_time:
@@ -555,9 +556,9 @@ class BaselineSimulator(SimulatorBase):
                         self._schedule_next(robot)
 
     def _handle_bl(self, ev: Event):
-        """새 주문을 빈 슬롯이 가장 많은 idle 로봇에 쌓고, 슬롯이 다 차면 출발시킨다.
+        """새 주문을 빈 슬롯이 가장 많은 idle 로봇에 쌓고, 슬롯이 다 차면 출발
 
-        idle 로봇이 없으면 대기 큐에 넣는다.
+        idle 로봇이 없으면 대기 큐에 넣음
 
         입력:
             ev: EVENT_ORDER_ARRIVAL 사건
@@ -578,7 +579,7 @@ class BaselineSimulator(SimulatorBase):
 
 
 class PartialSimulator(SimulatorBase):
-    """BL2 Partial-Buffer: idle 로봇에 주문이 partial_k개 쌓이면 바로 출발한다. mid-trip 삽입 없음."""
+    """BL2 Partial-Buffer: idle 로봇에 주문이 partial_k개 쌓이면 바로 출발. mid-trip 삽입 없음"""
 
     def __init__(self, *args, partial_k: int = PARTIAL_K, **kwargs):
         """
@@ -590,7 +591,7 @@ class PartialSimulator(SimulatorBase):
         self.partial_k = partial_k
 
     def reset(self, seed: int):
-        """에피소드 상태를 초기화한다.
+        """에피소드 상태 초기화
 
         입력:
             seed: 주문 생성 난수 시드
@@ -598,7 +599,7 @@ class PartialSimulator(SimulatorBase):
         self._reset_common(seed)
 
     def run(self):
-        """에피소드 1회를 끝까지 실행한다."""
+        """에피소드 1회를 끝까지 실행"""
         while self.eq:
             ev = self.eq.pop()
             if ev.time > self.sim_time:
@@ -623,9 +624,9 @@ class PartialSimulator(SimulatorBase):
                         self._schedule_next(robot)
 
     def _handle_partial(self, ev: Event):
-        """새 주문을 빈 슬롯이 가장 많은 idle 로봇에 쌓고, partial_k개가 되면 출발시킨다.
+        """새 주문을 빈 슬롯이 가장 많은 idle 로봇에 쌓고, partial_k개가 되면 출발
 
-        idle 로봇이 없으면 대기 큐에 넣는다.
+        idle 로봇이 없으면 대기 큐에 넣음
 
         입력:
             ev: EVENT_ORDER_ARRIVAL 사건
@@ -646,10 +647,10 @@ class PartialSimulator(SimulatorBase):
 
 
 class RandomAssignSimulator(SimulatorBase):
-    """BL3 Random: 빈 슬롯이 있는 로봇(idle + mid-trip) 중 무작위로 배정한다. mid-trip 삽입 허용."""
+    """BL3 Random: 빈 슬롯이 있는 로봇(idle + mid-trip) 중 무작위 배정. mid-trip 삽입 허용"""
 
     def reset(self, seed: int):
-        """에피소드 상태와 배정용 난수 생성기를 초기화한다.
+        """에피소드 상태와 배정용 난수 생성기 초기화
 
         입력:
             seed: 주문 생성 및 배정 난수 시드
@@ -658,7 +659,7 @@ class RandomAssignSimulator(SimulatorBase):
         self._assign_rng = random.Random(seed)
 
     def run(self):
-        """에피소드 1회를 끝까지 실행한다."""
+        """에피소드 1회를 끝까지 실행"""
         while self.eq:
             ev = self.eq.pop()
             if ev.time > self.sim_time:
@@ -679,7 +680,7 @@ class RandomAssignSimulator(SimulatorBase):
                     self._dispatch(robot, orders)
 
     def _handle_random(self, ev: Event):
-        """새 주문을 후보 로봇 중 무작위 1대에 배정한다. 후보가 없으면 대기 큐에 넣는다.
+        """새 주문을 후보 로봇 중 무작위 1대에 배정. 후보가 없으면 대기 큐에 넣음
 
         입력:
             ev: EVENT_ORDER_ARRIVAL 사건
@@ -713,10 +714,10 @@ class RandomAssignSimulator(SimulatorBase):
 
 
 class NearestRobotSimulator(SimulatorBase):
-    """BL4 Nearest: 빈 슬롯이 있는 로봇 중 주문 위치까지 현재 거리가 가장 짧은 로봇에 배정한다. mid-trip 삽입 허용."""
+    """BL4 Nearest: 빈 슬롯이 있는 로봇 중 주문 위치까지 현재 거리가 가장 짧은 로봇에 배정. mid-trip 삽입 허용"""
 
     def reset(self, seed: int):
-        """에피소드 상태를 초기화한다.
+        """에피소드 상태 초기화
 
         입력:
             seed: 주문 생성 난수 시드
@@ -724,7 +725,7 @@ class NearestRobotSimulator(SimulatorBase):
         self._reset_common(seed)
 
     def run(self):
-        """에피소드 1회를 끝까지 실행한다."""
+        """에피소드 1회를 끝까지 실행"""
         while self.eq:
             ev = self.eq.pop()
             if ev.time > self.sim_time:
@@ -745,7 +746,7 @@ class NearestRobotSimulator(SimulatorBase):
                     self._dispatch(robot, orders)
 
     def _handle_nearest(self, ev: Event):
-        """새 주문을 현재 위치가 가장 가까운 후보 로봇에 배정한다. 후보가 없으면 대기 큐에 넣는다.
+        """새 주문을 현재 위치가 가장 가까운 후보 로봇에 배정. 후보가 없으면 대기 큐에 넣음
 
         입력:
             ev: EVENT_ORDER_ARRIVAL 사건
@@ -780,14 +781,14 @@ class NearestRobotSimulator(SimulatorBase):
 
 
 class MinInsertionSimulator(SimulatorBase):
-    """BL5 Min-Insertion: 빈 슬롯이 있는 로봇 중 삽입 detour가 최소인 로봇에 배정한다. mid-trip 삽입 허용.
+    """BL5 Min-Insertion: 빈 슬롯이 있는 로봇 중 삽입 detour가 최소인 로봇에 배정. mid-trip 삽입 허용
 
-    detour 계산 기준은 RLSimulator와 같다 (idle 후보는 주문에서 가장 가까운
-    워크스테이션 복귀 가정, mid-trip 후보는 최적 복귀 워크스테이션 재탐색).
+    detour 계산 기준은 RLSimulator와 동일 (idle 후보는 주문에서 가장 가까운
+    워크스테이션 복귀 가정, mid-trip 후보는 최적 복귀 워크스테이션 재탐색)
     """
 
     def reset(self, seed: int):
-        """에피소드 상태를 초기화한다.
+        """에피소드 상태 초기화
 
         입력:
             seed: 주문 생성 난수 시드
@@ -795,7 +796,7 @@ class MinInsertionSimulator(SimulatorBase):
         self._reset_common(seed)
 
     def run(self):
-        """에피소드 1회를 끝까지 실행한다."""
+        """에피소드 1회를 끝까지 실행"""
         while self.eq:
             ev = self.eq.pop()
             if ev.time > self.sim_time:
@@ -816,7 +817,7 @@ class MinInsertionSimulator(SimulatorBase):
                     self._dispatch(robot, orders)
 
     def _handle_min_insertion(self, ev: Event):
-        """새 주문을 삽입 detour가 최소인 후보 로봇에 배정한다. 후보가 없으면 대기 큐에 넣는다.
+        """새 주문을 삽입 detour가 최소인 후보 로봇에 배정. 후보가 없으면 대기 큐에 넣음
 
         입력:
             ev: EVENT_ORDER_ARRIVAL 사건
@@ -834,7 +835,7 @@ class MinInsertionSimulator(SimulatorBase):
         target_coords = self.layout.workstations[nearest_ws_id]
 
         def _delta(r: Robot) -> float:
-            """로봇 r에 이 주문을 넣을 때 늘어나는 이동거리 (m)."""
+            """로봇 r에 이 주문을 넣을 때 늘어나는 이동거리 (m)"""
             return r.delta_distance_insert(
                 order.loc, self.layout,
                 target_ws_coords=(target_coords if r.is_idle else None),
@@ -868,11 +869,11 @@ def train(layout:         WarehouseLayout,
           label:          str   = "RL",
           verbose_every:  int   = VERBOSE_EVERY,
           curve_store:    Optional["TrainingCurveStore"] = None) -> None:
-    """RL 에이전트를 학습한다.
+    """RL 에이전트 학습
 
-    앞쪽 절반 에피소드는 λ를 [lam × CURRICULUM_LAM_MARGIN, lam]에서 무작위로
-    뽑는 커리큘럼으로, 나머지는 lam으로 학습한다. 에피소드마다 전이를
-    버퍼에 넣고 train_step을 1회 수행한다.
+    - 앞쪽 절반 에피소드: λ를 [lam × CURRICULUM_LAM_MARGIN, lam]에서 무작위로 뽑는 커리큘럼
+    - 나머지 에피소드: lam으로 학습
+    - 에피소드마다 전이를 버퍼에 넣고 train_step 1회 수행
 
     입력:
         layout: WarehouseLayout
@@ -912,7 +913,7 @@ def train(layout:         WarehouseLayout,
         agent.decay_epsilon(total_episodes)
 
         # 누적 보상은 완료 주문 수에 비례해 커지므로, λ/K 설정 간 비교가
-        # 가능하도록 완료 주문 1건당 평균으로 기록한다.
+        # 가능하도록 완료 주문 1건당 평균으로 기록
         n_done     = max(1, rl_sim.order_mgr.completed_count())
         avg_reward = rl_sim.total_reward / n_done
 
@@ -953,7 +954,7 @@ def evaluate_all(layout:         WarehouseLayout,
                  eval_seeds:     List[int] = None,
                  n_eval:         int = N_EVAL,
                  partial_k:      int = PARTIAL_K) -> None:
-    """같은 평가 시드로 RL(ε=0)과 BL1~BL5를 모두 실행해 결과를 기록한다.
+    """같은 평가 시드로 RL(ε=0)과 BL1~BL5를 모두 실행해 결과 기록
 
     입력:
         layout: WarehouseLayout
@@ -1018,7 +1019,7 @@ def evaluate_all(layout:         WarehouseLayout,
 
 def _robot_utilization(store: MetricsStore, label: str, lam: float,
                        num_robots: int) -> float:
-    """로봇 가동률 = 평균 총 이동거리 / (num_robots · 속도 · SIM_TIME).
+    """로봇 가동률 = 평균 총 이동거리 / (num_robots · 속도 · SIM_TIME)
 
     입력:
         store: 결과 저장소
@@ -1037,7 +1038,7 @@ def _robot_utilization(store: MetricsStore, label: str, lam: float,
 
 
 def _paired_ttest(a: List[float], b: List[float]) -> Tuple[float, float]:
-    """대응표본 t-검정. scipy가 없으면 정규근사로 p-value를 계산한다.
+    """대응표본 t-검정. scipy가 없으면 정규근사로 p-value 계산
 
     입력:
         a, b: 같은 시드 순서로 짝지어진 두 표본
@@ -1065,7 +1066,7 @@ def _paired_ttest(a: List[float], b: List[float]) -> Tuple[float, float]:
 
 
 def _print_advantage_summary(rows: List[Dict], baseline_labels: List[str]) -> None:
-    """λ별로 RL이 대기시간에서 유의하게(p < 0.05) 앞선 베이스라인 수를 출력한다.
+    """λ별로 RL이 대기시간에서 유의하게(p < 0.05) 앞선 베이스라인 수 출력
 
     입력:
         rows: analyze_load_sensitivity의 λ별 요약 행
@@ -1097,10 +1098,10 @@ def analyze_load_sensitivity(
     seed_base:      int = LOAD_SWEEP_SEED_BASE,
     out_csv:        Optional[str] = None,
 ) -> MetricsStore:
-    """학습된 에이전트를 여러 λ에서 평가해 RL이 베이스라인보다 나은 부하 구간을 찾는다.
+    """학습된 에이전트를 여러 λ에서 평가해 RL이 베이스라인보다 나은 부하 구간 탐색
 
     λ마다 로봇 가동률과, RL 대비 각 베이스라인의 대기시간/완료율 대응표본
-    t-검정 결과를 계산한다.
+    t-검정 결과 계산
 
     입력:
         layout: WarehouseLayout
@@ -1180,7 +1181,7 @@ def experiment_lambda_grid(
     out_dir:        str = OUT_DIR,
     curve_store:    Optional[TrainingCurveStore] = None,
 ) -> Dict[float, DQNAgent]:
-    """λ마다 새 에이전트를 학습하고 RL/베이스라인을 평가해 CSV로 저장한다.
+    """λ마다 새 에이전트 학습, RL/베이스라인 평가 후 CSV로 저장
 
     저장 파일 (out_dir):
         train_lam{λ}_M{M}.csv, eval_lam{λ}_M{M}_n{n_eval}.csv
@@ -1243,7 +1244,7 @@ def experiment_lambda_grid(
 
 
 def main():
-    """λ 그리드 실험을 실행하고 전체 평가 결과와 학습 곡선을 OUT_DIR에 저장한다."""
+    """λ 그리드 실험 실행 후 전체 평가 결과와 학습 곡선을 OUT_DIR에 저장"""
     os.makedirs(OUT_DIR, exist_ok=True)
 
     layout = WarehouseLayout(seed=DEFAULT_SEED)

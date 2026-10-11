@@ -1,11 +1,11 @@
-"""주문 도착 과정, SKU 수요, 저장 위치, 피킹/워크스테이션 처리 시간 분포 설정.
+"""주문 도착 과정, SKU 수요, 저장 위치, 피킹/워크스테이션 처리 시간 분포 설정
 
 Scenario() 기본값: 포아송 도착, 균등 SKU 수요, 무작위 저장, 고정 피킹/처리 시간
 (constant.PICK_TIME, WS_PROC_TIME). SKU/위치와 포아송 도착 간격은 OrderManager._rng에서,
-그 밖의 도착 과정과 처리 시간은 별도 생성기(arrival_rng, time_rng)에서 뽑는다.
+그 밖의 도착 과정과 처리 시간은 별도 생성기(arrival_rng, time_rng)에서 추출
 
 참고 문헌:
-  - ABC 수요 곡선 G(x) = x^s: Hausman, Schwarz & Graves (1976), Management Science 22(6).
+  - ABC 수요 곡선 G(x) = x^s: Hausman, Schwarz & Graves (1976), Management Science 22(6)
   - 클래스 기반 저장(인기 SKU를 출고 지점 가까이): 같은 논문의 class-based storage.
   - 로봇 창고(RMFS) 대기행렬 모형의 포아송 주문 도착: Lamballais, Roy & De Koster (2017), EJOR.
   - 전자상거래 창고의 시간대별 수요 변동과 몰림(피크, 웨이브): Boysen, de Koster & Weidinger (2019), EJOR.
@@ -27,11 +27,11 @@ TIME_DISTS    = ("fixed", "uniform", "exponential", "lognormal")
 @dataclass
 class Scenario:
     """시나리오 파라미터. 시간 단위는 초, 비율은 0~1."""
-    # 주문 도착 과정 (평균 도착률은 모두 시뮬레이터의 λ와 같게 맞춘다)
+    # 주문 도착 과정 (평균 도착률은 모두 시뮬레이터의 λ와 동일)
     arrival:        str   = "poisson"
     peak_mult:      float = 2.0    # nhpp_peak: 피크 구간 도착률 = peak_mult × 평균 λ
     peak_start:     float = 0.3    # nhpp_peak: 피크 시작 (시뮬레이션 시간 대비 비율)
-    peak_len:       float = 0.2    # nhpp_peak: 피크 길이 (비율). peak_mult × peak_len ≤ 1이어야 한다
+    peak_len:       float = 0.2    # nhpp_peak: 피크 길이 (비율). peak_mult × peak_len ≤ 1 필요
     sine_amp:       float = 0.5    # nhpp_sine: λ(t) = λ (1 + A sin(2πt / P)), 0 ≤ A ≤ 1
     sine_period:    float = 3600.0 # nhpp_sine: 주기 P (s)
     batch_mean:     float = 5.0    # batch: 한 번에 들어오는 평균 주문 수 (묶음 도착 = 웨이브)
@@ -73,7 +73,7 @@ class Scenario:
 
 
 class OrderStream:
-    """시나리오에 따라 주문 도착 시각/묶음 크기, SKU, 처리 시간을 뽑는다.
+    """시나리오에 따라 주문 도착 시각/묶음 크기, SKU, 처리 시간 샘플링
 
     order_rng: SKU/위치, 포아송 도착 간격 (OrderManager._rng)
     arrival_rng: 포아송이 아닌 도착 과정의 난수
@@ -95,7 +95,7 @@ class OrderStream:
     # 도착
 
     def rate_factor(self, t: float) -> float:
-        """비정상 포아송 도착률 배수 f(t) (시간 평균 1)."""
+        """비정상 포아송 도착률 배수 f(t) (시간 평균 1)"""
         sc = self.sc
         if sc.arrival == "nhpp_peak":
             s, l = sc.peak_start * self.horizon, sc.peak_len * self.horizon
@@ -108,7 +108,7 @@ class OrderStream:
 
     def next_arrival(self, t: float, order_rng: random.Random,
                      arrival_rng: random.Random) -> Tuple[float, int]:
-        """다음 도착 시각과 그때 들어오는 주문 수."""
+        """다음 도착 시각과 그때 들어오는 주문 수"""
         sc, lam = self.sc, self.lam
         if sc.arrival == "poisson":
             return t + order_rng.expovariate(lam), 1

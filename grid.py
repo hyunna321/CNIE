@@ -1,19 +1,19 @@
-"""그리드(셀) 기반 창고 레이아웃: 단방향 통로 그래프, 워크스테이션 대기열/주차 셀, 거리 테이블.
+"""그리드(셀) 기반 창고 레이아웃: 단방향 통로 그래프, 워크스테이션 대기열/주차 셀, 거리 테이블
 
-연속 좌표 레이아웃(environment.WarehouseLayout)과 같은 상수로 셀 지도를 만든다.
-CELL_SIZE = 1 m 기준 열 구성은 [랙][통로][통로][통로] × AN + [랙] (등을 맞댄 랙 2개가 1칸).
-행은 아래부터 워크스테이션 구역, 하단 교차통로, (블록 랙 행, 교차통로) × BN 이고
-맨 위에 교차통로를 하나 더 둔다 (단방향 통로가 막다른 길이 되지 않도록).
+연속 좌표 레이아웃(environment.WarehouseLayout)과 같은 상수로 셀 지도 생성
+CELL_SIZE = 1 m 기준 열 구성: [랙][통로][통로][통로] × AN + [랙] (등을 맞댄 랙 2개가 1칸)
+행 구성(아래부터): 워크스테이션 구역, 하단 교차통로, (블록 랙 행, 교차통로) × BN
+맨 위에 교차통로 하나 추가 (단방향 통로가 막다른 길이 되지 않도록)
 
 이동 규칙 (유향 그래프, traffic 인자):
-  - "free": 통로와 교차통로 안에서 상하좌우 모든 방향 이동.
+  - "free": 통로와 교차통로 안에서 상하좌우 모든 방향 이동
   - "lanes": 통로는 짝수 번째가 위(+y), 홀수 번째가 아래(−y)로만 이동하고 같은 통로 안
     좌우 이동은 허용. 교차통로는 아래 절반 행이 동쪽, 위 절반 행이 서쪽으로만 가로 이동하고
-    세로 이동은 양방향.
-  - 워크스테이션 구역은 두 모드 모두 아래와 같이 한 방향이다.
-  - 워크스테이션 k: 대기열 셀(동쪽으로 한 줄) -> 도킹 셀 -> 주차장.
-    대기열 입구는 맨 서쪽 셀 하나다. 주차장은 도킹 셀 동쪽에 주행 차선과 주차 칸 행을
-    번갈아 쌓은 구조로, 모든 주차 칸이 차선에 바로 붙어 있어 다른 주차 로봇에 막히지 않는다.
+    세로 이동은 양방향
+  - 워크스테이션 구역은 두 모드 모두 아래와 같이 한 방향
+  - 워크스테이션 k: 대기열 셀(동쪽으로 한 줄) -> 도킹 셀 -> 주차장
+    대기열 입구는 맨 서쪽 셀 하나. 주차장은 도킹 셀 동쪽에 주행 차선과 주차 칸 행을
+    번갈아 쌓은 구조로, 모든 주차 칸이 차선에 바로 붙어 있어 다른 주차 로봇에 막히지 않음
 
         교차통로 (하단)         ↑    ↑  ↑  ↑  ↑    ↑
         대기열 → → → 도킹 →  [ → →  →  →  →  ↓ ]   차선 0 (동쪽, 각 칸에서 교차통로로 출구)
@@ -21,7 +21,7 @@ CELL_SIZE = 1 m 기준 열 구성은 [랙][통로][통로][통로] × AN + [랙]
                               [ ↑ ← ← ← ← ← ← ]   차선 1 (서쪽)
                               [    P  P  P  P    ]   ...
 
-좌표는 정수 셀 (col, row) 튜플이고, 거리 = 셀 수 × CELL_SIZE (m).
+좌표는 정수 셀 (col, row) 튜플, 거리 = 셀 수 × CELL_SIZE (m)
 """
 import math
 from collections import deque
@@ -43,17 +43,17 @@ Cell = Tuple[int, int]
 # 셀 종류
 RACK, AISLE, CROSS, WS_ZONE = 0, 1, 2, 3
 
-# (WS 수, 대기열, 주차장 폭, 차선 수, 이동 규칙) -> 셀 그래프와 거리 테이블.
-# 시드와 무관하므로 레이아웃끼리 공유한다.
+# (WS 수, 대기열, 주차장 폭, 차선 수, 이동 규칙) -> 셀 그래프와 거리 테이블
+# 시드와 무관하므로 레이아웃끼리 공유
 _GRAPH_CACHE: Dict[tuple, dict] = {}
 
 
 class GridWarehouseLayout(WarehouseLayout):
-    """셀 기반 레이아웃. WarehouseLayout과 같은 인터페이스를 유지한다.
+    """셀 기반 레이아웃 (WarehouseLayout과 같은 인터페이스)
 
-    SKU 배치는 같은 시드의 연속 레이아웃과 동일하고, 저장 위치의 접근 좌표
-    (access_coords)와 워크스테이션 좌표만 셀 좌표로 바뀐다.
-    aisle_distance()는 유향 그래프 최단거리라 d(a, b) != d(b, a)일 수 있다.
+    - SKU 배치는 같은 시드의 연속 레이아웃과 동일
+    - 저장 위치의 접근 좌표(access_coords)와 워크스테이션 좌표만 셀 좌표로 변경
+    - aisle_distance()는 유향 그래프 최단거리라 d(a, b) != d(b, a) 가능
     """
 
     is_grid = True
@@ -76,7 +76,7 @@ class GridWarehouseLayout(WarehouseLayout):
             num_workstations: 워크스테이션 수 K
             queue_cells: 워크스테이션별 대기열 셀 수 (None이면 ceil(M/K))
             park_cells: 워크스테이션별 주차 칸 수 (None이면 M, 어느 WS에든 전원 주차 가능)
-            collisions: False이면 로봇끼리 셀 점유를 무시한다 (회귀 검증용, motion="reactive"에서만)
+            collisions: False이면 로봇끼리 셀 점유 무시 (회귀 검증용, motion="reactive"에서만)
             traffic: "free" (모든 방향) 또는 "lanes" (일방통행 통로 + 차선 교차통로)
             motion: "reserve" (배정 시 시공간 경로 예약) 또는 "reactive" (막히면 대기/우회)
             scenario: scenario.Scenario (도착/수요/저장/처리 시간 분포)
@@ -96,7 +96,7 @@ class GridWarehouseLayout(WarehouseLayout):
         self._build_cell_map()
         self._build_ws_zone()
 
-        # 저장 위치 인덱스 순서는 연속 레이아웃의 _build_storage_coords와 같다.
+        # 저장 위치 인덱스 순서는 연속 레이아웃의 _build_storage_coords와 동일
         self.access_coords = self._build_pick_cells()
         self.workstations  = list(self.docks)
         self.workstation   = self.workstations[0]
@@ -135,14 +135,14 @@ class GridWarehouseLayout(WarehouseLayout):
     # 셀 지도
 
     def _build_cell_map(self):
-        """셀 종류 배열과 통로 방향을 만든다."""
+        """셀 종류 배열과 통로 방향 생성"""
         aisle_w = self.aisle_w
         rack_w  = max(1, int(round(2 * Dt / CELL_SIZE)))
         wc      = int(round(Wc / CELL_SIZE))
         shelf_h = int(round(SN * Wt / CELL_SIZE))
         assert rack_w == 1, "현재 열 배치는 등을 맞댄 랙 2개가 1칸이라고 가정한다."
 
-        # 행 구간: (종류, 시작 행, 행 수). 블록 사이 교차통로는 연속 레이아웃처럼 2·Wc.
+        # 행 구간: (종류, 시작 행, 행 수). 블록 사이 교차통로는 연속 레이아웃처럼 2·Wc
         bands, blocks = [], []
         row = self.ws_rows                         # 아래 ws_rows행은 워크스테이션 구역
         bands.append((row, wc)); row += wc
@@ -156,7 +156,7 @@ class GridWarehouseLayout(WarehouseLayout):
         self.shelf_h  = shelf_h
 
         kind = np.full((self.n_cols, self.n_rows), RACK, dtype=np.int8)
-        kind[:, :self.ws_rows] = -1                # 워크스테이션 구역은 _build_ws_zone에서 채운다
+        kind[:, :self.ws_rows] = -1                # 워크스테이션 구역은 _build_ws_zone에서 채움
         for r0, h in bands:
             kind[:, r0:r0 + h] = CROSS
         for r0, h in blocks:
@@ -179,13 +179,13 @@ class GridWarehouseLayout(WarehouseLayout):
             self.row_dir[r0 + half:r0 + h] = -1
 
     def _size_ws_zone(self, queue_cells: Optional[int], park_cells: Optional[int]):
-        """열 수와 워크스테이션 구역 크기(대기열 길이, 주차장 폭/차선 수, 행 수)를 정한다."""
+        """열 수와 워크스테이션 구역 크기(대기열 길이, 주차장 폭/차선 수, 행 수) 결정"""
         aisle_w = int(round(Wa / CELL_SIZE))
         self.aisle_w = aisle_w
         self.module  = 1 + aisle_w
         self.n_cols  = AN * self.module + 1
 
-        # 도킹 셀은 연속 레이아웃처럼 폭 방향 균등 위치에 두고, 서쪽에 대기열, 동쪽에 주차장을 둔다.
+        # 도킹 셀은 연속 레이아웃처럼 폭 방향 균등 위치, 서쪽에 대기열, 동쪽에 주차장
         K, M   = self.num_workstations, self.num_robots
         per_ws = math.ceil(M / K)
         span   = self.n_cols // K
@@ -204,7 +204,7 @@ class GridWarehouseLayout(WarehouseLayout):
         self.ws_rows  = 2 * self.n_lanes
 
     def _build_ws_zone(self):
-        """워크스테이션별 대기열, 도킹 셀, 주차장(차선/주차 칸) 셀을 배치한다."""
+        """워크스테이션별 대기열, 도킹 셀, 주차장(차선/주차 칸) 셀 배치"""
         K, q, w, n = self.num_workstations, self.queue_len, self.lot_w, self.n_lanes
         r0 = self.ws_rows - 1                      # 교차통로 바로 아래 행
 
@@ -229,7 +229,7 @@ class GridWarehouseLayout(WarehouseLayout):
                 self.kind[c] = WS_ZONE
 
     def _build_pick_cells(self) -> List[Cell]:
-        """저장 위치마다 토트를 집는 통로 셀 (랙 바로 옆 통로 열)."""
+        """저장 위치마다 토트를 집는 통로 셀 (랙 바로 옆 통로 열)"""
         cells = []
         for b in range(BN):
             r0, _ = self.blocks[b]
@@ -249,7 +249,7 @@ class GridWarehouseLayout(WarehouseLayout):
         return 0 <= x < self.n_cols and 0 <= y < self.n_rows and self.kind[x, y] in (AISLE, CROSS, WS_ZONE)
 
     def _edges(self) -> List[Tuple[Cell, Cell]]:
-        """이동 규칙에 맞는 유향 간선 목록."""
+        """이동 규칙에 맞는 유향 간선 목록"""
         edges = []
         for x in range(self.n_cols):
             for y in range(self.ws_rows, self.n_rows):
@@ -297,7 +297,7 @@ class GridWarehouseLayout(WarehouseLayout):
         return edges
 
     def _build_graph(self) -> dict:
-        """셀 인덱스, 이웃 목록, 전체 쌍 최단거리(셀 수) 테이블을 만든다."""
+        """셀 인덱스, 이웃 목록, 전체 쌍 최단거리(셀 수) 테이블 생성"""
         cells = [(x, y) for x in range(self.n_cols) for y in range(self.n_rows)
                  if self._passable((x, y))]
         index = {c: i for i, c in enumerate(cells)}
@@ -318,11 +318,11 @@ class GridWarehouseLayout(WarehouseLayout):
     # 거리 / 이동
 
     def aisle_distance(self, p1: Cell, p2: Cell) -> float:
-        """p1에서 p2까지 유향 셀 그래프 최단거리 (m)."""
+        """p1에서 p2까지 유향 셀 그래프 최단거리 (m)"""
         return float(self._D[self.cell_index[p1], self.cell_index[p2]]) * CELL_SIZE
 
     def next_hops(self, u: Cell, goal: Cell) -> List[Cell]:
-        """u에서 goal 쪽 최단경로상의 다음 셀 후보 (거리가 1 줄어드는 이웃)."""
+        """u에서 goal 쪽 최단경로상의 다음 셀 후보 (거리가 1 줄어드는 이웃)"""
         iu, ig = self.cell_index[u], self.cell_index[goal]
         d = self._D[iu, ig] - 1
         col = self._D[:, ig]
@@ -330,7 +330,7 @@ class GridWarehouseLayout(WarehouseLayout):
 
     def detour_path(self, u: Cell, goal: Cell, blocked: Set[Cell],
                     max_len: int) -> Optional[List[Cell]]:
-        """blocked 셀을 피해 u -> goal로 가는 최단경로 (u 제외). max_len 칸을 넘으면 None."""
+        """blocked 셀을 피해 u -> goal로 가는 최단경로 (u 제외). max_len 칸을 넘으면 None"""
         iu, ig = self.cell_index[u], self.cell_index[goal]
         bl = {self.cell_index[c] for c in blocked}
         bl.discard(ig)
@@ -353,7 +353,7 @@ class GridWarehouseLayout(WarehouseLayout):
         return None
 
     def dist_to(self, goal: Cell) -> List[int]:
-        """셀 인덱스 -> goal까지 정적 최단거리(셀 수) 목록. 경로 탐색 휴리스틱용으로 캐시한다."""
+        """셀 인덱스 -> goal까지 정적 최단거리(셀 수) 목록 (경로 탐색 휴리스틱용, 캐시)"""
         h = self._h_cache.get(goal)
         if h is None:
             h = self._D[:, self.cell_index[goal]].tolist()
@@ -364,7 +364,7 @@ class GridWarehouseLayout(WarehouseLayout):
         return c in self.dock_ws
 
     def initial_positions(self, num_robots: int) -> List[Cell]:
-        """로봇 rid를 워크스테이션 rid % K의 주차 칸에 도킹 셀에서 가까운 순으로 배치한다."""
+        """로봇 rid를 워크스테이션 rid % K의 주차 칸에 도킹 셀에서 가까운 순으로 배치"""
         used = [0] * self.num_workstations
         pos = []
         for rid in range(num_robots):

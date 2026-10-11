@@ -1,6 +1,7 @@
-"""RL 개선 실험: 업데이트 비율과 BL6 한계비용 특징의 효과를 BL6와 비교한다.
+"""RL 개선 실험: 업데이트 비율과 BL6 한계비용 특징의 효과를 BL6와 비교
 
-arm, 환경, 시드 하나를 학습/평가해 저장한다. 조합마다 프로세스를 따로 띄워 병렬로 돌린다.
+arm, 환경, 시드 하나를 학습/평가해 저장
+조합마다 프로세스를 따로 띄워 병렬 실행
 
 사용법:
     python run_rl_improve.py --env grid --arm smdp_r8_bl6 --seed 42
@@ -58,7 +59,7 @@ def make_layout(env: str, num_robots: int, num_workstations: int):
 
 def run(env: str, arm: str, seed: int, num_robots: int, num_workstations: int, lam_hr: int,
         episodes: int, n_eval: int):
-    """arm 하나를 학습/평가하고 저장한다."""
+    """arm 하나를 학습/평가 후 저장"""
     lam      = lam_hr / 3600.0
     layout   = make_layout(env, num_robots, num_workstations)
     out      = os.path.join(OUT_DIR, f"{env}_M{num_robots}_lam{lam_hr}", f"{arm}_s{seed}")
@@ -101,7 +102,7 @@ def run(env: str, arm: str, seed: int, num_robots: int, num_workstations: int, l
 
 
 def summarize():
-    """설정별로 RL arm과 베이스라인의 평균 흐름시간, BL6 대비 차이(같은 평가 시드 대응)를 출력한다."""
+    """설정별로 RL arm과 베이스라인의 평균 흐름시간, BL6 대비 차이(같은 평가 시드 대응) 출력"""
     for setting in sorted(glob.glob(os.path.join(OUT_DIR, "*"))):
         flows = defaultdict(dict)        # label/seed -> {eval episode: flow}
         for path in glob.glob(os.path.join(setting, "*", "eval.csv")):

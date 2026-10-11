@@ -1,4 +1,4 @@
-"""뷰어 설정으로 그리드 시뮬레이션을 한 번 돌리고 기록을 돌려준다."""
+"""뷰어 설정으로 그리드 시뮬레이션을 한 번 실행하고 기록 반환"""
 import glob
 import os
 import subprocess
@@ -25,7 +25,7 @@ POLICIES = {
 
 
 def find_checkpoints() -> List[str]:
-    """저장소 안의 체크포인트(*.pt) 경로 (가상환경 제외, 최근 수정 순)."""
+    """저장소 안의 체크포인트(*.pt) 경로 (가상환경 제외, 최근 수정 순)"""
     paths = [p for p in glob.glob(os.path.join(REPO, "**", "*.pt"), recursive=True)
              if "/.venv/" not in p and "/site-packages/" not in p]
     paths.sort(key=os.path.getmtime, reverse=True)
@@ -41,7 +41,7 @@ def read_checkpoint_meta(path: str) -> dict:
 
 
 def meta() -> dict:
-    """뷰어 설정 화면에 필요한 선택지와 기본값."""
+    """뷰어 설정 화면에 필요한 선택지와 기본값"""
     return {
         "policies": POLICIES,
         "scenario_defaults": Scenario().to_dict(),
@@ -54,7 +54,7 @@ def meta() -> dict:
 
 
 def layout_info(L: GridWarehouseLayout) -> dict:
-    """정적 지도: 셀 종류, 셀 인덱스 -> 좌표, 워크스테이션 구역."""
+    """정적 지도: 셀 종류, 셀 인덱스 -> 좌표, 워크스테이션 구역"""
     kinds = []
     for y in range(L.n_rows):
         row = []
@@ -76,7 +76,7 @@ def layout_info(L: GridWarehouseLayout) -> dict:
 
 
 def run(cfg: Dict) -> dict:
-    """뷰어 설정 cfg로 시뮬레이션을 돌리고 지도, 기록, 요약 지표를 돌려준다."""
+    """뷰어 설정 cfg로 시뮬레이션을 돌리고 지도, 기록, 요약 지표 반환"""
     from agents import DQNAgent
     from simulator import RLSimulator
     from baselines import (FullBufferSimulator, PartialSimulator, RandomAssignSimulator,
@@ -133,7 +133,7 @@ def run(cfg: Dict) -> dict:
 
 
 def _scenario_from(d: dict) -> Scenario:
-    """화면 입력을 Scenario로 바꾼다. 빈 칸(None)은 기본값을 쓰고, 모르는 키는 무시한다."""
+    """화면 입력을 Scenario로 변환 (빈 칸(None)은 기본값, 모르는 키는 무시)"""
     from dataclasses import fields
     names = {f.name for f in fields(Scenario)}
     clean = {k: v for k, v in d.items() if k in names and v is not None}

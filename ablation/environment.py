@@ -8,10 +8,10 @@ from constant import (
 
 
 class WarehouseLayout:
-    """블록/통로/선반으로 구성된 창고 레이아웃과 통로 기반 거리 계산.
+    """블록/통로/선반으로 구성된 창고 레이아웃과 통로 기반 거리 계산
 
-    워크스테이션 K개는 창고 하단(y=0)에 폭 방향으로 균등 배치되고,
-    각 저장 위치에는 SKU가 무작위로 할당된다.
+    워크스테이션 K개는 창고 하단(y=0)에 폭 방향으로 균등 배치
+    각 저장 위치에는 SKU 무작위 할당
     """
 
     def __init__(self, seed: int = DEFAULT_SEED,
@@ -55,7 +55,7 @@ class WarehouseLayout:
         self.loc_to_sku, self.sku_to_locs = self._assign_skus()
 
     def _build_workstations(self) -> List[Tuple[float, float]]:
-        """워크스테이션 좌표를 생성한다.
+        """워크스테이션 좌표 생성
 
         출력:
             창고 하단(y=0)에 폭 방향으로 균등 배치된 K개 좌표 리스트
@@ -65,7 +65,7 @@ class WarehouseLayout:
         return [(x, 0.0) for x in xs]
 
     def _build_storage_coords(self):
-        """모든 저장 위치의 좌표와 통로 접근 좌표를 생성한다.
+        """모든 저장 위치의 좌표와 통로 접근 좌표 생성
 
         출력:
             (coords, access)
@@ -91,9 +91,9 @@ class WarehouseLayout:
         return coords, access
 
     def _assign_skus(self) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
-        """저장 위치마다 SKU를 무작위로 할당한다.
+        """저장 위치마다 SKU 무작위 할당
 
-        위치가 하나도 할당되지 않은 SKU는 임의 위치 하나를 추가로 매핑한다.
+        위치가 하나도 할당되지 않은 SKU는 임의 위치 하나를 추가로 매핑
 
         출력:
             (loc_to_sku, sku_to_locs)
@@ -118,7 +118,7 @@ class WarehouseLayout:
         return loc_to_sku, sku_to_locs
 
     def manhattan(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
-        """두 점의 맨해튼(L1) 거리. 랙 통과를 허용하므로 이동 비용 계산에는 쓰지 않는다.
+        """두 점의 맨해튼(L1) 거리. 랙 통과를 허용하므로 이동 비용 계산에는 사용 안 함
 
         입력:
             p1, p2: (x, y) 좌표
@@ -129,7 +129,7 @@ class WarehouseLayout:
 
     @staticmethod
     def _band_vert(ya: float, yb: float, lo: float, hi: float) -> float:
-        """교차통로 밴드 [lo, hi]를 경유해 ya에서 yb로 갈 때의 세로 이동거리.
+        """교차통로 밴드 [lo, hi]를 경유해 ya에서 yb로 갈 때의 세로 이동거리
 
         입력:
             ya, yb: 출발/도착 y 좌표
@@ -147,10 +147,10 @@ class WarehouseLayout:
         return abs(ya - yc) + abs(yb - yc)
 
     def aisle_distance(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
-        """통로 그래프 위 최단 이동거리.
+        """통로 그래프 위 최단 이동거리
 
         같은 세로 통로(x 동일)이면 |Δy|, 다른 통로이면 가장 유리한
-        교차통로 밴드를 경유하는 거리(세로 우회 + |Δx|)를 쓴다.
+        교차통로 밴드를 경유하는 거리(세로 우회 + |Δx|)
 
         입력:
             p1, p2: (x, y) 좌표
@@ -168,7 +168,7 @@ class WarehouseLayout:
         return best
 
     def sample_order_sku(self, rng: random.Random) -> int:
-        """주문 SKU를 균등 확률로 하나 뽑는다.
+        """주문 SKU를 균등 확률로 하나 추출
 
         입력:
             rng: 난수 생성기
@@ -180,7 +180,7 @@ class WarehouseLayout:
     def find_tote_location(
         self, sku: int, rng: random.Random
     ) -> Tuple[int, Tuple[float, float]]:
-        """SKU가 보관된 위치 중 하나를 무작위로 고른다.
+        """SKU가 보관된 위치 중 하나를 무작위 선택
 
         입력:
             sku: SKU id
@@ -194,12 +194,12 @@ class WarehouseLayout:
 
     @property
     def num_locations(self) -> int:
-        """전체 저장 위치 수."""
+        """전체 저장 위치 수"""
         return len(self.storage_coords)
 
     @property
     def num_skus(self) -> int:
-        """전체 SKU 수."""
+        """전체 SKU 수"""
         return len(self.sku_ids)
 
 
@@ -208,7 +208,7 @@ def nearest_neighbor_route(
     destinations: List[Tuple[float, float]],
     dist_func:    Callable[[Tuple[float, float], Tuple[float, float]], float],
 ) -> List[Tuple[float, float]]:
-    """최근접 이웃(NNH) 방식으로 방문 순서를 정한다.
+    """최근접 이웃(NNH) 방식으로 방문 순서 결정
 
     입력:
         start: 출발 좌표
@@ -233,7 +233,7 @@ def route_total_distance(
     end:       Tuple[float, float],
     dist_func: Callable[[Tuple[float, float], Tuple[float, float]], float],
 ) -> float:
-    """start -> route -> end 경로의 총 이동거리.
+    """start -> route -> end 경로의 총 이동거리
 
     입력:
         start: 출발 좌표
@@ -258,7 +258,7 @@ def nearest_workstation(
     workstations: List[Tuple[float, float]],
     dist_func: Callable[[Tuple[float, float], Tuple[float, float]], float],
 ) -> int:
-    """주어진 위치에서 가장 가까운 워크스테이션을 찾는다.
+    """주어진 위치에서 가장 가까운 워크스테이션 탐색
 
     입력:
         loc: 기준 좌표
@@ -276,7 +276,7 @@ def best_workstation_route(
     workstations: List[Tuple[float, float]],
     dist_func: Callable[[Tuple[float, float], Tuple[float, float]], float],
 ) -> Tuple[int, List[Tuple[float, float]], float]:
-    """NNH 경로를 만들고, 총 이동거리가 최소가 되는 복귀 워크스테이션을 고른다.
+    """NNH 경로를 만들고 총 이동거리가 최소가 되는 복귀 워크스테이션 선택
 
     입력:
         start: 출발 좌표
