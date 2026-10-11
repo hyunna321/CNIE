@@ -1,5 +1,7 @@
 # CNIE
 
+시뮬레이션 동작 방식과 TODO: [SIMULATION.md](SIMULATION.md)
+
 ## 시뮬레이션 뷰어
 
 ```bash
