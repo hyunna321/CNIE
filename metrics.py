@@ -34,6 +34,8 @@ class EpisodeResult:
     n_plans:                int   = 0     # 시공간 경로계획 횟수 (그리드 reserve 모드)
     n_plan_fail:            int   = 0     # 경로계획 실패 횟수 (그리드 reserve 모드)
     plan_time_s:            float = 0.0   # 경로계획에 쓴 실행 시간 (그리드 reserve 모드)
+    n_wait_action:          int   = 0     # RL이 wait를 고른 횟수 (reward_mode="smdp_w")
+    n_forced_wait:          int   = 0     # 그중 후보가 없어 강제로 대기한 횟수
 
     @property
     def completion_rate(self) -> float:

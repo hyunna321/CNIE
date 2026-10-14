@@ -14,6 +14,7 @@ arm:
     smdp_r8_bl6    : SMDP 보상, 결정 8개당 업데이트 1회, BL6 한계비용 특징 추가
     legacy_r8_base : legacy 보상, 결정 8개당 업데이트 1회, 기본 특징
     legacy_r8_bl6  : legacy 보상, 결정 8개당 업데이트 1회, BL6 특징 추가
+    smdpw_r8       : SMDP + wait 행동 + shaping (RLWaitSimulator), 결정 8개당 업데이트 1회
     baselines      : BL6, BL4, Greedy-R만 평가
 
 env:
@@ -33,10 +34,12 @@ from environment import WarehouseLayout
 from grid import GridWarehouseLayout
 from agents import DQNAgent
 from metrics import MetricsStore, TrainingCurveStore
-from simulator import RLSimulator
+from simulator import rl_simulator_cls
+from scenario import Scenario
 from training import train
 from baselines import MarginalCostSimulator, NearestRobotSimulator, GreedyRewardSimulator
-from constant import SIM_TIME, DEFAULT_SEED, ROBOT_CAPACITY, TOTAL_EPISODES, N_EVAL, EVAL_SEED_BASE
+from constant import (SIM_TIME, DEFAULT_SEED, ROBOT_CAPACITY, TOTAL_EPISODES, N_EVAL, EVAL_SEED_BASE,
+                      PICK_TIME, WS_PROC_TIME)
 
 OUT_DIR = "logs_rl_improve"
 ARMS = {
@@ -45,24 +48,30 @@ ARMS = {
     "smdp_r8_bl6":    dict(reward_mode="smdp",   update_ratio=8,    feature_set="bl6"),
     "legacy_r8_base": dict(reward_mode="legacy", update_ratio=8,    feature_set="base"),
     "legacy_r8_bl6":  dict(reward_mode="legacy", update_ratio=8,    feature_set="bl6"),
+    "smdpw_r8":       dict(reward_mode="smdp_w", update_ratio=8,    feature_set="smdp_w"),
 }
 BASELINES = {"BL6_MarginalCost": MarginalCostSimulator, "BL4_Nearest": NearestRobotSimulator,
              "Greedy_R": GreedyRewardSimulator}
 
 
-def make_layout(env: str, num_robots: int, num_workstations: int):
+def make_layout(env: str, num_robots: int, num_workstations: int,
+                pick_time: float = PICK_TIME, proc_time: float = WS_PROC_TIME):
+    sc = Scenario(pick_time=pick_time, ws_proc_time=proc_time)
     if env == "grid":
         return GridWarehouseLayout(seed=DEFAULT_SEED, num_robots=num_robots,
-                                   num_workstations=num_workstations, traffic="free", motion="reserve")
-    return WarehouseLayout(seed=DEFAULT_SEED, num_robots=num_robots, num_workstations=num_workstations)
+                                   num_workstations=num_workstations, traffic="free", motion="reserve",
+                                   scenario=sc)
+    return WarehouseLayout(seed=DEFAULT_SEED, num_robots=num_robots, num_workstations=num_workstations,
+                           scenario=sc)
 
 
 def run(env: str, arm: str, seed: int, num_robots: int, num_workstations: int, lam_hr: int,
-        episodes: int, n_eval: int):
+        episodes: int, n_eval: int, pick_time: float = PICK_TIME, proc_time: float = WS_PROC_TIME):
     """arm 하나를 학습/평가 후 저장"""
     lam      = lam_hr / 3600.0
-    layout   = make_layout(env, num_robots, num_workstations)
-    out      = os.path.join(OUT_DIR, f"{env}_M{num_robots}_lam{lam_hr}", f"{arm}_s{seed}")
+    layout   = make_layout(env, num_robots, num_workstations, pick_time, proc_time)
+    tag      = f"_pick{pick_time:g}_proc{proc_time:g}" if (pick_time or proc_time) else ""
+    out      = os.path.join(OUT_DIR, f"{env}_M{num_robots}_lam{lam_hr}{tag}", f"{arm}_s{seed}")
     os.makedirs(out, exist_ok=True)
     seeds    = list(range(EVAL_SEED_BASE, EVAL_SEED_BASE + n_eval))
     ev_store = MetricsStore()
@@ -94,8 +103,9 @@ def run(env: str, arm: str, seed: int, num_robots: int, num_workstations: int, l
         "traffic": "free" if env == "grid" else None, "motion": "reserve" if env == "grid" else None,
         "scenario": layout.scenario.to_dict(), "arm": arm, "train_seed": seed, **cfg})
     for i, s in enumerate(seeds):
-        sim = RLSimulator(layout, agent, lam=lam, seed=s, num_robots=num_robots,
-                          robot_capacity=ROBOT_CAPACITY, eval_mode=True, reward_mode=cfg["reward_mode"])
+        sim = rl_simulator_cls(cfg["reward_mode"])(
+            layout, agent, lam=lam, seed=s, num_robots=num_robots,
+            robot_capacity=ROBOT_CAPACITY, eval_mode=True, reward_mode=cfg["reward_mode"])
         sim.reset(s); sim.run()
         ev_store.add(sim.build_result(arm, i, lam))
     ev_store.save_csv(os.path.join(out, "eval.csv"))
@@ -133,12 +143,15 @@ def main():
     ap.add_argument("--lam", type=int, default=800, help="orders/hr")
     ap.add_argument("--episodes", type=int, default=TOTAL_EPISODES)
     ap.add_argument("--n-eval", type=int, default=N_EVAL)
+    ap.add_argument("--pick-time", type=float, default=PICK_TIME, help="s/토트, 피킹 시간 (그리드 모드)")
+    ap.add_argument("--proc-time", type=float, default=WS_PROC_TIME, help="s/토트, 워크스테이션 처리 시간 (그리드 모드)")
     ap.add_argument("--summarize", action="store_true")
     a = ap.parse_args()
     if a.summarize:
         summarize()
     else:
-        run(a.env, a.arm, a.seed, a.robots, a.workstations, a.lam, a.episodes, a.n_eval)
+        run(a.env, a.arm, a.seed, a.robots, a.workstations, a.lam, a.episodes, a.n_eval,
+            a.pick_time, a.proc_time)
 
 
 if __name__ == "__main__":

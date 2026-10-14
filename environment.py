@@ -526,6 +526,30 @@ class Robot:
 
         return after - before
 
+    def insert_preview(self, loc: Tuple[float, float], layout: WarehouseLayout,
+                       idle_ws_id: int) -> Tuple[float, int]:
+        """주문을 넣었을 때의 (추가 이동거리, 복귀 워크스테이션 인덱스)
+
+        idle이면 idle_ws_id로 복귀 가정, 이동 중이면 최적 워크스테이션 재탐색
+        (delta_distance_insert와 같은 기준)
+
+        입력:
+            loc: 추가할 주문 위치
+            layout: WarehouseLayout
+            idle_ws_id: idle 로봇의 가정 복귀 워크스테이션 인덱스
+        출력:
+            (추가 이동거리 (m), 복귀 워크스테이션 인덱스)
+        """
+        if self.is_idle:
+            delta = self.delta_distance_insert(
+                loc, layout, target_ws_coords=layout.workstations[idle_ws_id])
+            return delta, idle_ws_id
+        pending = list(self.route) + [loc]
+        start   = self.current_dest if self.current_dest else self.pos
+        ws_id, _, after = best_workstation_route(
+            start, pending, layout.workstations, layout.aisle_distance)
+        return after - self._remaining_route_dist(layout, self.workstation), ws_id
+
     def state_vector(self, max_cap: int, max_time: float = STATE_MAX_TIME) -> np.ndarray:
         """로봇 상태를 현재 복귀 워크스테이션 기준 상대좌표로 인코딩
 

@@ -9,7 +9,7 @@ import numpy as np
 from environment import WarehouseLayout
 from agents import DQNAgent
 from metrics import MetricsStore, TrainingPoint, TrainingCurveStore, print_comparison
-from simulator import RLSimulator
+from simulator import rl_simulator_cls
 from baselines import (
     FullBufferSimulator, PartialSimulator, RandomAssignSimulator,
     NearestRobotSimulator, MinInsertionSimulator, MarginalCostSimulator,
@@ -56,7 +56,7 @@ def train(layout:         WarehouseLayout,
         label: 결과 라벨
         verbose_every: 진행 로그 출력 주기 (에피소드)
         curve_store: 학습 곡선 기록용 TrainingCurveStore (선택)
-        reward_mode: "legacy" 또는 "smdp" (RLSimulator 참고)
+        reward_mode: "legacy", "smdp" (RLSimulator) 또는 "smdp_w" (RLWaitSimulator)
         updates_per_episode: 에피소드마다 수행할 train_step 횟수
         update_ratio: 주어지면 updates_per_episode 대신 (그 에피소드의 전이 수 / update_ratio)회 업데이트
                       (예: 8이면 결정 8개당 1회)
@@ -64,9 +64,10 @@ def train(layout:         WarehouseLayout,
     reward_cfg = reward_cfg or {}
     lam_lo, lam_hi = lam * CURRICULUM_LAM_MARGIN, lam
 
-    rl_sim = RLSimulator(layout, agent, lam=lam, seed=seed,
-                         num_robots=num_robots, robot_capacity=robot_capacity,
-                         reward_cfg=reward_cfg, reward_mode=reward_mode)
+    rl_sim = rl_simulator_cls(reward_mode)(
+        layout, agent, lam=lam, seed=seed,
+        num_robots=num_robots, robot_capacity=robot_capacity,
+        reward_cfg=reward_cfg, reward_mode=reward_mode)
     rng = random.Random(seed)
 
     for ep in range(1, total_episodes + 1):
@@ -156,9 +157,10 @@ def evaluate_all(layout:         WarehouseLayout,
 
     for i, s in enumerate(eval_seeds):
 
-        sim = RLSimulator(layout, agent, lam=lam, seed=s,
-                          num_robots=num_robots, robot_capacity=robot_capacity,
-                          eval_mode=True, reward_mode=reward_mode)
+        sim = rl_simulator_cls(reward_mode)(
+            layout, agent, lam=lam, seed=s,
+            num_robots=num_robots, robot_capacity=robot_capacity,
+            eval_mode=True, reward_mode=reward_mode)
         sim.reset(s)
         sim.run()
         n_done     = max(1, sim.order_mgr.completed_count())
