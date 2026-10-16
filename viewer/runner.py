@@ -61,11 +61,11 @@ def run(cfg: Dict) -> dict:
                            NearestRobotSimulator, MinInsertionSimulator, MarginalCostSimulator)
     t_wall = time.time()
     cfg = {"policy": "BL6", "num_robots": 14, "num_workstations": 3, "robot_capacity": ROBOT_CAPACITY,
-           "lam_hr": 800, "sim_time": 3600, "seed": 10000, "traffic": "free", "motion": "reserve",
+           "lam_hr": 320, "sim_time": 3600, "seed": 10000, "traffic": "free", "motion": "reserve",
            "scenario": {}, **cfg}
     M, K   = int(cfg.get("num_robots", 14)), int(cfg.get("num_workstations", 3))
     cap    = int(cfg.get("robot_capacity", ROBOT_CAPACITY))
-    lam    = float(cfg.get("lam_hr", 800)) / 3600.0
+    lam    = float(cfg.get("lam_hr", 320)) / 3600.0
     T      = float(cfg.get("sim_time", 3600))
     seed   = int(cfg.get("seed", 10000))
     sc     = _scenario_from(cfg.get("scenario") or {})

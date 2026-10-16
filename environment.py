@@ -1,11 +1,16 @@
-"""로봇 상태와 트립 경로 구성 (NNH 방문 순서, 복귀 워크스테이션 선택)
+"""로봇 상태와 트립 경로 구성 (피킹 위치 NNH 순서 -> 도킹 셀 NNH 순서)
 
 좌표는 grid.GridWarehouseLayout의 셀 (col, row), 거리는 layout.aisle_distance (유향 셀 그래프 최단거리, m)
+
+트립 = 피킹 단계 (route) + 하역 단계 (drops)
+  - 실은 토트마다 가야 할 워크스테이션이 주문 도착 시 정해져 있으므로 하역할 도킹 셀은 정책이 아니라
+    실은 토트가 결정 (simulator._needed_docks)
+  - NNH는 피킹 위치 방문 순서와, 마지막 피킹 위치에서 출발하는 도킹 셀 방문 순서만 정함
 """
 from __future__ import annotations
 
 from collections import deque
-from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, List, Tuple
 
 if TYPE_CHECKING:
     from grid import GridWarehouseLayout
@@ -37,79 +42,39 @@ def nearest_neighbor_route(
     return route
 
 
-def route_total_distance(
-    start:     Cell,
-    route:     List[Cell],
-    end:       Cell,
-    dist_func: Callable[[Cell, Cell], float],
-) -> float:
-    """start -> route -> end 경로의 총 이동거리
-
-    입력:
-        start: 출발 좌표
-        route: 경유 좌표 리스트 (순서대로 방문)
-        end: 도착 좌표
-        dist_func: 두 좌표 간 거리 함수
-    출력:
-        총 이동거리
-    """
-    if not route:
-        return dist_func(start, end)
+def path_distance(start: Cell, stops: List[Cell],
+                  dist_func: Callable[[Cell, Cell], float]) -> float:
+    """start -> stops 순서대로 방문하는 총 이동거리"""
     total, current = 0.0, start
-    for point in route:
-        total   += dist_func(current, point)
-        current  = point
-    total += dist_func(current, end)
+    for p in stops:
+        total  += dist_func(current, p)
+        current = p
     return total
 
 
-def nearest_workstation(
-    loc: Cell,
-    workstations: List[Cell],
-    dist_func: Callable[[Cell, Cell], float],
-) -> int:
-    """주어진 위치에서 가장 가까운 워크스테이션 탐색
-
-    입력:
-        loc: 기준 좌표
-        workstations: 워크스테이션 좌표 리스트
-        dist_func: 두 좌표 간 거리 함수
-    출력:
-        가장 가까운 워크스테이션 인덱스
-    """
-    return min(range(len(workstations)), key=lambda i: dist_func(loc, workstations[i]))
-
-
-def best_workstation_route(
-    start: Cell,
-    destinations: List[Cell],
-    workstations: List[Cell],
-    dist_func: Callable[[Cell, Cell], float],
-) -> Tuple[int, List[Cell], float]:
-    """NNH 경로 생성 후 총 이동거리가 최소가 되는 복귀 워크스테이션 선택
+def plan_trip(start: Cell, picks: List[Cell], docks: List[Cell],
+              dist_func: Callable[[Cell, Cell], float]) -> Tuple[List[Cell], List[Cell], float]:
+    """피킹 위치를 NNH로 방문한 뒤 도킹 셀을 NNH로 방문하는 경로
 
     입력:
         start: 출발 좌표
-        destinations: 방문할 좌표 리스트
-        workstations: 복귀 후보 워크스테이션 좌표 리스트
+        picks: 방문할 피킹 셀 (중복 가능)
+        docks: 방문할 도킹 셀 (중복 없음)
         dist_func: 두 좌표 간 거리 함수
     출력:
-        (workstation_id, route, total_distance)
+        (피킹 순서, 도킹 순서, start부터 마지막 도킹 셀까지 총 이동거리)
     """
-    route = nearest_neighbor_route(start, destinations, dist_func)
-    best_id, best_dist = 0, float("inf")
-    for wid, ws in enumerate(workstations):
-        d = route_total_distance(start, route, ws, dist_func)
-        if d < best_dist:
-            best_dist, best_id = d, wid
-    return best_id, route, best_dist
+    pick_route = nearest_neighbor_route(start, picks, dist_func)
+    last       = pick_route[-1] if pick_route else start
+    dock_route = nearest_neighbor_route(last, docks, dist_func)
+    return pick_route, dock_route, path_distance(start, pick_route + dock_route, dist_func)
 
 
 class Robot:
     """피킹 로봇의 위치, 남은 경로, 적재 슬롯 상태 관리
 
-    workstation / workstation_id: 현재 트립의 복귀 워크스테이션
-    (트립 시작 또는 주문 삽입 때마다 총 이동거리가 최소가 되도록 재결정)
+    route: 남은 피킹 셀 (current_dest 제외), drops: 피킹 후 들를 도킹 셀
+    workstation / workstation_id: 트립의 마지막 도킹 셀 (트립 후 그 WS 주차장에 주차)
     """
 
     def __init__(self, robot_id: int, workstation: Cell,
@@ -118,7 +83,7 @@ class Robot:
         """
         입력:
             robot_id: 로봇 id
-            workstation: 초기 워크스테이션 좌표
+            workstation: 초기 워크스테이션 도킹 셀
             layout: GridWarehouseLayout
             capacity: 적재 가능한 토트 수
             workstation_id: 초기 워크스테이션 인덱스
@@ -134,6 +99,7 @@ class Robot:
         """로봇을 워크스테이션에 대기 중인 빈 상태로 되돌림"""
         self.pos               = self.workstation
         self.route             = []
+        self.drops             = []
         self.idle_slots        = self.capacity
         self.is_idle           = True
         self.current_dest      = None
@@ -148,139 +114,74 @@ class Robot:
         self.plan_version      = 0
         self.plan              = deque()     # (틱, 셀) 순서의 예약 경로
         self.replan_pending    = False
-        self.pending_insert    = []          # 계획 실패로 아직 경로에 넣지 못한 삽입 주문 위치
+        self.pending_insert    = []          # 계획 실패로 아직 경로에 넣지 못한 삽입 토트 위치
+
+    @property
+    def stops(self) -> List[Cell]:
+        """current_dest 이후 남은 방문 지점 (피킹 셀 -> 도킹 셀)"""
+        return self.route + self.drops
 
     @property
     def remaining_distance(self) -> float:
-        """현재 목적지 -> 남은 경로 -> 복귀 워크스테이션까지 남은 이동거리 (m)"""
-        d = 0.0
-        if self.current_dest:
-            d += self._md(self.pos, self.current_dest)
-        if self.route:
-            prev = self.current_dest if self.current_dest else self.pos
-            for nxt in self.route:
-                d += self._md(prev, nxt)
-                prev = nxt
-            d += self._md(prev, self.workstation)
-        elif self.current_dest:
-            d += self._md(self.current_dest, self.workstation)
-        return d
+        """현재 위치 -> current_dest -> 남은 피킹 셀 -> 도킹 셀까지 남은 이동거리 (m)"""
+        if self.current_dest is None:
+            return 0.0
+        return self._md(self.pos, self.current_dest) + \
+            path_distance(self.current_dest, self.stops, self._md)
+
+    def trip_distance_with(self, picks: List[Cell], docks: List[Cell]) -> float:
+        """현재 목적지는 유지하고 그 뒤를 picks, docks로 다시 짤 때의 남은 이동거리 (m)"""
+        if self.current_dest is None:
+            return plan_trip(self.pos, picks, docks, self._md)[2]
+        return self._md(self.pos, self.current_dest) + \
+            plan_trip(self.current_dest, picks, docks, self._md)[2]
 
     def arrive_at_node(self) -> bool:
-        """현재 목적지 도착 처리 후 다음 목적지 꺼냄
+        """현재 목적지 도착 처리 후 다음 목적지 꺼냄 (피킹 셀 먼저, 그다음 도킹 셀)
 
         출력:
-            남은 경유지가 있어 다음 목적지가 설정되면 True, 없으면 False
+            남은 방문 지점이 있어 다음 목적지가 설정되면 True, 없으면 False
         """
         self.pos = self.current_dest
-        if self.route:
-            self.current_dest = self.route.pop(0)
-            return True
         self.current_dest = None
-        return False
+        self._start_move()
+        return self.current_dest is not None
 
-    def assign_trip(self, destinations: List[Cell],
-                    layout: GridWarehouseLayout):
+    def assign_trip(self, picks: List[Cell], docks: List[Cell]):
         """현재 위치에서 출발하는 새 트립 배정 및 이동 시작
 
-        - 방문 순서: NNH
-        - 복귀 워크스테이션: 총 이동거리가 최소인 곳
-
         입력:
-            destinations: 방문할 좌표 리스트
-            layout: GridWarehouseLayout
+            picks: 방문할 피킹 셀
+            docks: 하역할 도킹 셀
         """
-        best_ws_id, route, _ = best_workstation_route(
-            self.pos, destinations, layout.workstations, layout.aisle_distance)
-        self.workstation_id = best_ws_id
-        self.workstation     = layout.workstations[best_ws_id]
-        self.route       = route
-        self.idle_slots  = self.capacity - len(destinations)
+        self.route, self.drops, _ = plan_trip(self.pos, picks, docks, self._md)
+        self._set_final_ws()
+        self.idle_slots  = self.capacity - len(picks)
         self.is_idle     = False
         self.route_version += 1
         self._start_move()
 
-    def insert_and_reorder(self, loc: Cell,
-                            layout: GridWarehouseLayout):
-        """이동 중인 트립에 주문 삽입 후 남은 경로와 복귀 워크스테이션 재계산
-
-        현재 목적지(current_dest)는 유지하고 그 이후 경로만 재구성
-
-        입력:
-            loc: 삽입할 주문 위치
-            layout: GridWarehouseLayout
-        """
-        pending = list(self.route) + [loc]
-        start   = self.current_dest if self.current_dest else self.pos
-        best_ws_id, new_route, _ = best_workstation_route(
-            start, pending, layout.workstations, layout.aisle_distance)
-        self.workstation_id = best_ws_id
-        self.workstation     = layout.workstations[best_ws_id]
-        self.route       = new_route
-        self.idle_slots  = max(0, self.idle_slots - 1)
+    def reroute(self, picks: List[Cell], docks: List[Cell]):
+        """이동 중인 트립의 남은 경로를 picks, docks로 다시 구성 (current_dest는 유지, 슬롯 수는 그대로)"""
+        start = self.current_dest if self.current_dest is not None else self.pos
+        self.route, self.drops, _ = plan_trip(start, picks, docks, self._md)
+        self._set_final_ws()
         self.route_version += 1
 
-    def delta_distance_insert(self, loc: Cell,
-                               layout: GridWarehouseLayout,
-                               target_ws_coords: Optional[Cell] = None,
-                               dynamic_ws: bool = False,
-                               ) -> float:
-        """주문을 이 로봇에 추가했을 때 늘어나는 이동거리
-
-        복귀 지점 결정 우선순위:
-          1) target_ws_coords가 주어지면 그 좌표로 고정 (idle 후보 평가용)
-          2) dynamic_ws=True이면 주문 포함 후 최적 워크스테이션으로 재탐색
-             (insert_and_reorder와 같은 기준, mid-trip 후보 평가용)
-          3) 그 외에는 현재 self.workstation 사용
-
-        입력:
-            loc: 추가할 주문 위치
-            layout: GridWarehouseLayout
-            target_ws_coords: 고정할 복귀 좌표
-            dynamic_ws: 복귀 워크스테이션 재탐색 여부
-        출력:
-            삽입 후 남은 경로 거리 − 삽입 전 남은 경로 거리 (m)
-        """
-        pending = list(self.route) + [loc]
-        start   = self.current_dest if self.current_dest else self.pos
-
-        if target_ws_coords is not None:
-            end       = target_ws_coords
-            before    = self._remaining_route_dist(layout, end)
-            new_route = nearest_neighbor_route(start, pending, layout.aisle_distance)
-            after     = route_total_distance(start, new_route, end, layout.aisle_distance)
-        elif dynamic_ws:
-            before          = self._remaining_route_dist(layout, self.workstation)
-            _, _, after_ws  = best_workstation_route(
-                start, pending, layout.workstations, layout.aisle_distance)
-            after = after_ws
-        else:
-            end       = self.workstation
-            before    = self._remaining_route_dist(layout, end)
-            new_route = nearest_neighbor_route(start, pending, layout.aisle_distance)
-            after     = route_total_distance(start, new_route, end, layout.aisle_distance)
-
-        return after - before
-
-    def _remaining_route_dist(self, layout: GridWarehouseLayout,
-                               end: Optional[Cell] = None) -> float:
-        """현재 목적지(없으면 현재 위치)부터 남은 경로를 거쳐 end까지의 거리
-
-        입력:
-            layout: GridWarehouseLayout
-            end: 도착 좌표 (None이면 self.workstation)
-        출력:
-            이동거리 (m)
-        """
-        end   = end if end is not None else self.workstation
-        start = self.current_dest if self.current_dest else self.pos
-        return route_total_distance(start, self.route, end,
-                                    layout.aisle_distance)
+    def _set_final_ws(self):
+        """마지막 도킹 셀을 트립의 워크스테이션으로 설정"""
+        last = self.drops[-1] if self.drops else (
+            self.current_dest if self.current_dest is not None and self.layout.is_dock(self.current_dest) else None)
+        if last is not None:
+            self.workstation    = last
+            self.workstation_id = self.layout.dock_ws[last]
 
     def _start_move(self):
-        """경로의 첫 지점을 현재 목적지로 설정"""
+        """남은 방문 지점의 첫 지점을 현재 목적지로 설정"""
         if self.route:
             self.current_dest = self.route.pop(0)
+        elif self.drops:
+            self.current_dest = self.drops.pop(0)
 
     def _md(self, p1, p2):
         """통로 그래프 거리 (layout.aisle_distance 단축)"""

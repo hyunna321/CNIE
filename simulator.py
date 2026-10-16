@@ -1,4 +1,11 @@
-"""그리드 창고 시뮬레이터: 주문/사건 관리, 셀 단위 틱 이동 엔진 (reactive / reserve)"""
+"""그리드 창고 시뮬레이터: 주문/토트/사건 관리, 셀 단위 틱 이동 엔진 (reactive / reserve)
+
+주문 1건 = 서로 다른 SKU 여러 개. 토트 1개는 SKU 1개만 담으므로 SKU마다 토트 1개를 워크스테이션으로 가져와야 함
+  - 주문은 도착 시 워크스테이션 하나에 배정 (_choose_ws), 그 주문의 토트는 모두 그 WS에서 처리
+  - 배정 정책은 토트 단위로 로봇을 고름. 한 주문의 토트가 여러 로봇·트립에 나뉠 수 있음
+  - 주문 완료 = 마지막 토트의 WS 처리 완료
+  - 토트 재고/반납은 모델링하지 않음 (가져간 저장 위치도 계속 사용 가능)
+"""
 import heapq
 import math
 import random
@@ -7,7 +14,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional
 
-from environment import Robot, nearest_workstation
+from environment import Robot
 from grid import GridWarehouseLayout
 from reservation import ReservationTable, plan_leg
 from metrics import EpisodeResult
@@ -16,26 +23,40 @@ from constant import (
     GRID_REPLAN_WAIT, GRID_DETOUR_MAX_EXTRA, GRID_DEADLOCK_TICKS,
 )
 
+Cell = Tuple[int, int]
 
-# 주문 / 사건 관리
 
-@dataclass
+# 주문 / 토트 / 사건 관리
+
+@dataclass(eq=False)
+class Tote:
+    """주문의 SKU 1개를 담은 토트 1개 (배정 단위)"""
+    tote_id:      int
+    order:        "Order"
+    sku:          int
+    loc_idx:      int
+    loc:          Cell
+    pick_s:       float = 0.0             # 랙에서 이 토트를 꺼내는 시간 (s)
+    proc_s:       float = 0.0             # 워크스테이션에서 이 토트를 처리하는 시간 (s)
+    assign_time:  Optional[float] = None  # 로봇에 배정된 시각
+    done_time:    Optional[float] = None  # WS 처리 완료 시각
+    picked:       bool  = False           # 로봇이 이미 집었는지
+
+    @property
+    def ws_id(self) -> int:
+        return self.order.ws_id
+
+
+@dataclass(eq=False)
 class Order:
-    """주문 1건
-
-    특정 워크스테이션에 귀속되지 않음
-    복귀 워크스테이션은 주문을 담은 로봇의 트립 구성에 따라 결정
-    """
-    order_id:        int
-    sku:             int
-    loc_idx:         int
-    loc:             tuple
-    arrival_time:    float
-    completion_time:    Optional[float] = None
-    service_start_time: Optional[float] = None   # 로봇에 배정된 시각
-    pick_s:             float = 0.0             # 랙에서 이 토트를 꺼내는 시간 (s)
-    proc_s:             float = 0.0             # 워크스테이션에서 이 토트를 처리하는 시간 (s)
-    picked:             bool  = False           # 로봇이 이미 집었는지
+    """주문 1건: 서로 다른 SKU의 토트 목록, 처리할 워크스테이션"""
+    order_id:           int
+    arrival_time:       float
+    totes:              List[Tote] = field(default_factory=list)
+    ws_id:              int = -1
+    service_start_time: Optional[float] = None   # 첫 토트가 로봇에 배정된 시각
+    completion_time:    Optional[float] = None   # 마지막 토트의 WS 처리 완료 시각
+    n_done:             int = 0
 
 
 EVENT_ORDER_ARRIVAL = "ORDER_ARRIVAL"
@@ -80,7 +101,7 @@ class EventQueue:
 
 
 class OrderManager:
-    """주문 생성(layout.scenario의 도착/수요/처리 시간 분포)과 단일 FIFO 대기 큐, 주문 단위 지표 관리"""
+    """주문 생성(layout.scenario의 분포)과 토트 단위 FIFO 대기 큐, 주문 단위 지표 관리"""
 
     def __init__(self, layout, lam: float, seed: int = DEFAULT_SEED):
         """
@@ -93,10 +114,12 @@ class OrderManager:
         self.lam               = lam
         self._rng               = random.Random(seed)
         self._cnt               = 0
+        self._tote_cnt          = 0
         self.num_workstations   = layout.num_workstations
 
-        self.wait_queue:          List[Order]  = []
+        self.wait_queue:          List[Tote]   = []
         self.all_orders:          List[Order]  = []
+        self.all_totes:           List[Tote]   = []
         self._queue_entry_times:  List[float]  = []
         self.horizon            = SIM_TIME      # 비정상 도착률 프로파일의 기준 시간 (SimulatorBase가 설정)
         self._seed_streams(seed)
@@ -114,11 +137,13 @@ class OrderManager:
         입력:
             seed: 새 주문 생성 난수 시드
         """
-        self._rng    = random.Random(seed)
-        self._cnt    = 0
+        self._rng      = random.Random(seed)
+        self._cnt      = 0
+        self._tote_cnt = 0
         self.wait_queue          = []
         self._queue_entry_times  = []
         self.all_orders.clear()
+        self.all_totes.clear()
         self._seed_streams(seed)
 
     def next_arrival(self, current_time: float) -> Tuple[float, int]:
@@ -132,72 +157,85 @@ class OrderManager:
         return self.stream.next_arrival(current_time, self._rng, self._arrival_rng)
 
     def create_order(self, arrival_time: float) -> Order:
-        """SKU와 보관 위치를 샘플링해 새 주문 생성, 전체 주문 목록에 기록
+        """SKU 수, 서로 다른 SKU들, SKU마다 토트 위치를 샘플링해 새 주문 생성
 
         입력:
             arrival_time: 주문 도착 시각 (s)
         출력:
-            생성된 Order
+            생성된 Order (ws_id는 시뮬레이터가 정함)
         """
-        sku          = self.stream.sample_sku(self._rng, self.layout.sku_ids)
-        loc_idx, loc = self.layout.find_tote_location(sku, self._rng)
-        order        = Order(self._cnt, sku, loc_idx, loc, arrival_time,
-                             pick_s=self.stream.sample_pick(self._time_rng),
-                             proc_s=self.stream.sample_proc(self._time_rng))
-        self._cnt   += 1
+        order = Order(self._cnt, arrival_time)
+        n     = self.stream.sample_lines(self._rng)
+        for sku in self.stream.sample_skus(self._rng, self.layout.sku_ids, n):
+            loc_idx, loc = self.layout.find_tote_location(sku, self._rng)
+            tote = Tote(self._tote_cnt, order, sku, loc_idx, loc,
+                        pick_s=self.stream.sample_pick(self._time_rng),
+                        proc_s=self.stream.sample_proc(self._time_rng))
+            self._tote_cnt += 1
+            order.totes.append(tote)
+            self.all_totes.append(tote)
+        self._cnt += 1
         self.all_orders.append(order)
         return order
 
-    def enqueue(self, order: Order, enqueue_time: float):
-        """배정할 로봇이 없는 주문을 대기 큐 끝에 추가
+    def enqueue(self, tote: Tote, enqueue_time: float):
+        """배정할 로봇이 없는 토트를 대기 큐 끝에 추가
 
         입력:
-            order: 대기시킬 주문
+            tote: 대기시킬 토트
             enqueue_time: 큐 진입 시각 (s)
         """
-        self.wait_queue.append(order)
+        self.wait_queue.append(tote)
         self._queue_entry_times.append(enqueue_time)
 
-    def dequeue_up_to(self, n: int) -> List[Order]:
+    def dequeue_up_to(self, n: int) -> List[Tote]:
         """대기 큐 앞에서 FIFO 순서로 최대 n개 꺼내기
 
         입력:
-            n: 꺼낼 최대 주문 수
+            n: 꺼낼 최대 토트 수
         출력:
-            꺼낸 주문 리스트
+            꺼낸 토트 리스트
         """
         k  = min(n, len(self.wait_queue))
-        orders = self.wait_queue[:k]
-        self.last_batch_entry_times = list(self._queue_entry_times[:k])
-        self.wait_queue             = self.wait_queue[k:]
-        self._queue_entry_times     = self._queue_entry_times[k:]
-        return orders
+        totes = self.wait_queue[:k]
+        self.wait_queue         = self.wait_queue[k:]
+        self._queue_entry_times = self._queue_entry_times[k:]
+        return totes
 
     def queue_size(self) -> int:
-        """현재 대기 큐 길이"""
+        """현재 대기 큐 길이 (토트 수)"""
         return len(self.wait_queue)
 
-    def record_service_start(self, order: Order, time: float):
-        """주문이 처음 로봇에 배정된 시각 기록 (이미 기록돼 있으면 무시)
+    def record_assign(self, tote: Tote, time: float):
+        """토트가 로봇에 배정된 시각 기록 (주문의 첫 배정 시각도 갱신)
 
         입력:
-            order: 대상 주문
+            tote: 대상 토트
             time: 배정 시각 (s)
         """
-        if order.service_start_time is None:
-            order.service_start_time = time
+        if tote.assign_time is None:
+            tote.assign_time = time
+        o = tote.order
+        if o.service_start_time is None:
+            o.service_start_time = time
 
-    def record_completion(self, order: Order, time: float):
-        """주문 완료(워크스테이션 도착) 시각 기록
+    def record_tote_done(self, tote: Tote, time: float) -> bool:
+        """토트 WS 처리 완료 기록. 주문의 마지막 토트였으면 주문 완료 처리 후 True
 
         입력:
-            order: 대상 주문
+            tote: 처리를 마친 토트
             time: 완료 시각 (s)
         """
-        order.completion_time = time
+        tote.done_time = time
+        o = tote.order
+        o.n_done += 1
+        if o.n_done == len(o.totes):
+            o.completion_time = time
+            return True
+        return False
 
     def avg_wait_time(self) -> float:
-        """평균 대기시간(배정 시각 − 도착 시각). 이동/서비스 시간 제외
+        """주문 평균 대기시간 (첫 토트 배정 시각 − 도착 시각). 이동/서비스 시간 제외
 
         출력:
             배정된 주문들의 평균 대기시간 (s), 없으면 0.0
@@ -209,7 +247,7 @@ class OrderManager:
         return sum(waits) / len(waits) if waits else 0.0
 
     def avg_flow_time(self) -> float:
-        """평균 체류시간(완료 시각 − 도착 시각). 대기 + 이동 시간 모두 포함
+        """주문 평균 체류시간 (완료 시각 − 도착 시각). 대기 + 이동 + 처리 시간 모두 포함
 
         출력:
             완료된 주문들의 평균 체류시간 (s), 없으면 0.0
@@ -224,6 +262,10 @@ class OrderManager:
         """완료된 주문 수"""
         return sum(1 for o in self.all_orders if o.completion_time is not None)
 
+    def totes_done_count(self) -> int:
+        """WS 처리를 마친 토트 수"""
+        return sum(1 for t in self.all_totes if t.done_time is not None)
+
 
 # 시뮬레이터
 
@@ -231,12 +273,12 @@ class SimulatorBase:
     """그리드 창고 시뮬레이터의 공통 부분
 
     - 로봇 풀은 모든 워크스테이션이 공유, 초기 위치만 라운드로빈으로 분산
-    - 대기 주문은 단일 FIFO 큐(OrderManager.wait_queue)로 관리
-    - 트립 시작/주문 삽입 때마다 총 이동거리가 최소가 되는 복귀
-      워크스테이션 재선정 (environment.best_workstation_route)
+    - 대기 토트는 단일 FIFO 큐(OrderManager.wait_queue)로 관리
+    - 트립: 실은 토트의 피킹 위치를 NNH로 돈 뒤, 그 토트들의 WS 도킹 셀을 NNH로 돌며 하역
+      (environment.plan_trip). 도킹 셀에서는 그 WS로 가는 토트의 처리 시간 합만큼 머묾
 
-    하위 클래스는 _on_order_arrival()로 배정 정책 정의, 필요하면
-    _on_trip_complete() 재정의
+    하위 클래스는 _on_tote_arrival()로 배정 정책 정의, 필요하면
+    _on_trip_complete(), _choose_ws() 재정의
 
     로봇 이동은 셀 단위 틱(CELL_SIZE / ROBOT_SPEED)으로 시뮬레이션 (run)
     - 배정 결정은 주문 도착 사건 시점, 결정 시점의 로봇 위치는 직전 틱 기준
@@ -256,7 +298,7 @@ class SimulatorBase:
             seed: 주문 생성 난수 시드
             sim_time: 시뮬레이션 시간 (s)
             num_robots: 로봇 수
-            robot_capacity: 로봇 용량
+            robot_capacity: 로봇 용량 (토트)
         """
         self.layout           = layout
         self.lam              = lam
@@ -271,21 +313,29 @@ class SimulatorBase:
         self.order_mgr.horizon = sim_time
         self.eq        = EventQueue()
         self.now       = 0.0
-
-        self._robot_orders:          Dict[int, List[Order]] = {i: [] for i in range(num_robots)}
-        self._total_sim_distance:    float                  = 0.0
-        self._total_trips:           int                    = 0
-        self._mid_trip_count:        int                    = 0
-        self._extra_travel:          float                  = 0.0
-        self._n_in_system:           int                    = 0
-        self._blocked_time:          float                  = 0.0
-        self._n_replans:             int                    = 0
-        self.reserve:                bool                   = layout.motion == "reserve"
-        self._n_plans:               int                    = 0
-        self._n_plan_fail:           int                    = 0
-        self._plan_time:             float                  = 0.0
+        self.reserve   = layout.motion == "reserve"
+        self._reset_stats()
         # 시각화 기록기 (viewer.recorder.Recorder). None이면 기록 안 함
         self.recorder = None
+
+    def _reset_stats(self):
+        # 로봇별 배정됐지만 아직 하역하지 않은 토트 (배정 순서)
+        self._robot_totes:   Dict[int, List[Tote]] = {i: [] for i in range(self.num_robots)}
+        self._dropping:      Dict[int, List[Tote]] = {i: [] for i in range(self.num_robots)}   # WS 처리 중인 토트
+        self._ws_load:       List[int]             = [0] * self.num_workstations   # WS별 처리 전 토트 수
+        self._completions:   List[Tuple[float, float]] = []    # (완료 시각, 흐름시간), 주문 완료 순
+        self._total_sim_distance = 0.0
+        self._total_trips        = 0
+        self._trip_totes         = [0] * self.num_robots   # 로봇별 이번 트립에 하역한 토트 수
+        self._totes_in_trips     = 0                       # 완료된 트립의 하역 토트 합
+        self._mid_trip_count     = 0
+        self._extra_travel       = 0.0
+        self._n_in_system        = 0
+        self._blocked_time       = 0.0
+        self._n_replans          = 0
+        self._n_plans            = 0
+        self._n_plan_fail        = 0
+        self._plan_time          = 0.0
 
     def _build_robots(self) -> List[Robot]:
         """로봇 생성 및 워크스테이션에 라운드로빈으로 초기 배치
@@ -311,23 +361,13 @@ class SimulatorBase:
         self.now = 0.0
         self.order_mgr.reset(seed)
         self.eq  = EventQueue()
-        self._robot_orders          = {i: [] for i in range(self.num_robots)}
-        self._total_sim_distance    = 0.0
-        self._total_trips           = 0
-        self._mid_trip_count        = 0
-        self._extra_travel          = 0.0
-        self._n_in_system           = 0
-        self._blocked_time          = 0.0
-        self._n_replans             = 0
-        self._n_plans               = 0
-        self._n_plan_fail           = 0
-        self._plan_time             = 0.0
+        self._reset_stats()
         for r in self.robots:
             r.reset()
         for r, pos in zip(self.robots, self.layout.initial_positions(self.num_robots)):
             r.pos, r.park_spot = pos, pos
         self._spots_taken = {r.park_spot for r in self.robots}
-        self._occ: Dict[Tuple[int, int], int] = {r.pos: r.id for r in self.robots}
+        self._occ: Dict[Cell, int] = {r.pos: r.id for r in self.robots}
         self._last_move_time = 0.0
         # 예약 모드: 지금 계획을 세우면 경로가 시작되는 틱 (주문 도착 시 직전 틱, 틱 처리 중이면 그 틱)
         self._t0_ctx = 0
@@ -375,10 +415,14 @@ class SimulatorBase:
         self._advance_clock(self.sim_time)
 
     def _handle_order_event(self, ev: Event):
-        """주문 도착 사건: 들어온 주문마다 배정 정책 호출, 다음 도착 사건 예약"""
+        """주문 도착 사건: 주문마다 WS를 정하고 토트마다 배정 정책 호출, 다음 도착 사건 예약"""
         for _ in range(ev.data.get("count", 1)):
+            order = self.order_mgr.create_order(self.now)
+            order.ws_id = self._choose_ws(order)
+            self._ws_load[order.ws_id] += len(order.totes)
             self._n_in_system += 1
-            self._on_order_arrival()
+            for tote in order.totes:
+                self._on_tote_arrival(tote)
         nxt, n = self.order_mgr.next_arrival(self.now)
         if nxt <= self.sim_time:
             self.eq.push(Event(nxt, EVENT_ORDER_ARRIVAL, {"count": n}))
@@ -391,20 +435,24 @@ class SimulatorBase:
         """
         self.now = t
 
-    def _on_order_arrival(self):
-        """새 주문 도착 시 배정 정책. 하위 클래스에서 구현"""
+    def _choose_ws(self, order: Order) -> int:
+        """주문을 처리할 워크스테이션: 처리 전 토트가 가장 적은 WS (동률이면 번호가 작은 WS)"""
+        return min(range(self.num_workstations), key=lambda k: (self._ws_load[k], k))
+
+    def _on_tote_arrival(self, tote: Tote):
+        """새 토트의 배정 정책. 하위 클래스에서 구현"""
         raise NotImplementedError
 
     def _on_trip_complete(self, robot: Robot):
-        """트립 완료 처리 후, 대기 주문이 있으면 최대 용량만큼 꺼내 새 트립 시작
+        """트립 완료 처리 후, 대기 토트가 있으면 최대 용량만큼 꺼내 새 트립 시작
 
         입력:
             robot: 트립을 마친 로봇
         """
         self._complete_trip(robot)
-        orders = self.order_mgr.dequeue_up_to(self.robot_capacity)
-        if orders:
-            self._dispatch(robot, orders)
+        totes = self.order_mgr.dequeue_up_to(self.robot_capacity)
+        if totes:
+            self._dispatch(robot, totes)
 
     def _eligible_robots(self) -> List[Robot]:
         """빈 슬롯이 있는 로봇 목록 (mid-trip 로봇 먼저, 그다음 idle 로봇)
@@ -412,11 +460,24 @@ class SimulatorBase:
         출력:
             Robot 리스트
         """
-        # 워크스테이션 처리 중인 로봇은 트립이 끝나는 중이므로 삽입 후보에서 제외
+        # 워크스테이션 처리 중인 로봇은 도킹 셀에 묶여 있으므로 삽입 후보에서 제외
         busy     = [r for r in self.robots
                     if not r.is_idle and r.idle_slots > 0 and r.timer_kind != "ws"]
         idle_any = [r for r in self.robots if r.is_idle and r.idle_slots > 0]
         return busy + idle_any
+
+    def _needed_docks(self, r: Robot) -> List[Cell]:
+        """r이 아직 하역하지 않은 토트의 WS 도킹 셀 (WS 번호 순)
+
+        current_dest가 도킹 셀 k이고 k로 갈 토트를 모두 집었으면 그 도착에서 하역하므로 제외
+        """
+        ws = {t.ws_id for t in self._robot_totes[r.id]}
+        c = r.current_dest
+        if c is not None and self.layout.is_dock(c):
+            k = self.layout.dock_ws[c]
+            if k in ws and all(t.picked for t in self._robot_totes[r.id] if t.ws_id == k):
+                ws.discard(k)
+        return [self.layout.workstations[k] for k in sorted(ws)]
 
     def _robot_time_left(self, r: Robot) -> float:
         """트립 완료까지 남은 예상 시간 (s): 이동 + 남은 피킹 + WS 처리. 혼잡 대기는 미포함
@@ -428,88 +489,66 @@ class SimulatorBase:
         """
         if r.is_idle:
             return 0.0
-        if r.timer_kind == "ws":
-            return r.timer
-        orders = self._robot_orders[r.id]
+        totes = self._robot_totes[r.id]
         return (r.remaining_distance / ROBOT_SPEED + r.timer
-                + sum(o.pick_s for o in orders if not o.picked) + sum(o.proc_s for o in orders))
+                + sum(t.pick_s for t in totes if not t.picked) + sum(t.proc_s for t in totes))
 
-    def _idle_return_target(self, loc: Tuple[int, int]) -> Tuple[int, int]:
-        """idle 로봇에 배정할 때 가정하는 복귀 지점 (주문 위치에서 가장 가까운 워크스테이션)
+    def _insertion_delta(self, robot: Robot, tote: Tote) -> float:
+        """로봇에 토트를 넣을 때 늘어나는 이동거리 (m)
 
-        입력:
-            loc: 주문 위치
-        출력:
-            워크스테이션 좌표
-        """
-        ws_id = nearest_workstation(loc, self.layout.workstations, self.layout.aisle_distance)
-        return self.layout.workstations[ws_id]
-
-    def _insertion_delta(self, robot: Robot, loc: Tuple[int, int],
-                         target_coords: Tuple[int, int]) -> float:
-        """로봇에 주문을 넣을 때 늘어나는 이동거리
-
-        idle 로봇은 target_coords로 복귀한다고 가정, mid-trip 로봇은
-        최적 복귀 워크스테이션 재탐색
+        삽입 후 경로 = 현재 목적지 유지 + (남은 피킹 셀 + 새 토트 위치) NNH + (필요 도킹 셀 + 새 토트 WS) NNH
+        idle 로봇은 현재 위치에서 출발하는 새 트립 전체 거리
 
         입력:
             robot: 후보 로봇
-            loc: 주문 위치
-            target_coords: idle 로봇의 가정 복귀 좌표
+            tote: 새 토트
         출력:
             추가 이동거리 (m)
         """
-        return robot.delta_distance_insert(
-            loc, self.layout,
-            target_ws_coords=(target_coords if robot.is_idle else None),
-            dynamic_ws=(not robot.is_idle))
+        dock  = self.layout.workstations[tote.ws_id]
+        docks = self._needed_docks(robot)
+        if dock not in docks:
+            docks.append(dock)
+        after = robot.trip_distance_with(robot.route + [tote.loc], docks)
+        return after - robot.remaining_distance
 
-    def _assign_order(self, robot: Robot, order: Order):
-        """주문을 로봇에 배정. idle이면 새 트립 시작, 이동 중이면 경로에 삽입
+    def _assign_tote(self, robot: Robot, tote: Tote):
+        """토트를 로봇에 배정. idle이면 새 트립 시작, 이동 중이면 경로에 삽입
 
         입력:
             robot: 배정할 로봇
-            order: 주문
+            tote: 토트
         """
-        self._robot_orders[robot.id].append(order)
-        self._record_service_start(order, self.now)
+        self._robot_totes[robot.id].append(tote)
+        self.order_mgr.record_assign(tote, self.now)
         if robot.is_idle:
-            robot.assign_trip([order.loc], self.layout)
+            robot.assign_trip([tote.loc], self._needed_docks(robot))
             self._schedule_next(robot)
         elif self.reserve:
             robot.idle_slots = max(0, robot.idle_slots - 1)
-            self._reserve_insert(robot, robot.pending_insert + [order.loc])
+            self._reserve_insert(robot, robot.pending_insert + [tote.loc])
             self._mid_trip_count += 1
         else:
-            robot.insert_and_reorder(order.loc, self.layout)
+            robot.idle_slots = max(0, robot.idle_slots - 1)
+            robot.reroute(robot.route + [tote.loc], self._needed_docks(robot))
             self._mid_trip_count += 1
 
-    def _record_service_start(self, order: Order, t: float):
-        """주문의 로봇 배정 시각 기록
-
-        입력:
-            order: 대상 주문
-            t: 배정 시각 (s)
-        """
-        self.order_mgr.record_service_start(order, t)
-
     def _complete_trip(self, robot: Robot):
-        """트립을 마친 로봇을 idle로 되돌리고 실었던 주문 완료 처리
+        """트립을 마친 로봇을 idle로 되돌림 (토트는 도킹 셀마다 이미 하역)
 
         입력:
             robot: 트립을 마친 로봇
         """
-        robot.pos          = robot.workstation
+        if self._robot_totes[robot.id]:
+            raise RuntimeError(f"로봇 {robot.id}: 하역하지 않은 토트가 남은 채 트립 완료 (t={self.now:.0f})")
         robot.is_idle      = True
         robot.idle_slots   = self.robot_capacity
         robot.route        = []
+        robot.drops        = []
         robot.current_dest = None
-        completed = list(self._robot_orders.pop(robot.id, []))
-        for o in completed:
-            self.order_mgr.record_completion(o, self.now)
-        self._n_in_system -= len(completed)
-        self._total_trips            += 1
-        self._robot_orders[robot.id]  = []
+        self._total_trips    += 1
+        self._totes_in_trips += self._trip_totes[robot.id]
+        self._trip_totes[robot.id] = 0
 
     def _schedule_next(self, robot: Robot):
         """현재 목적지로 출발. 실제 이동과 거리 집계는 매 틱 (_grid_tick / _reserve_tick)
@@ -530,17 +569,17 @@ class SimulatorBase:
         if robot.pos == robot.current_dest:
             self._grid_on_arrive(robot)
 
-    def _dispatch(self, robot: Robot, orders: List[Order]):
-        """대기 큐에서 꺼낸 주문들로 로봇의 새 트립 시작
+    def _dispatch(self, robot: Robot, totes: List[Tote]):
+        """대기 큐에서 꺼낸 토트들로 로봇의 새 트립 시작
 
         입력:
             robot: idle 로봇
-            orders: 배정할 주문 리스트
+            totes: 배정할 토트 리스트
         """
-        robot.assign_trip([o.loc for o in orders], self.layout)
-        self._robot_orders[robot.id] = list(orders)
-        for o in orders:
-            self._record_service_start(o, self.now)
+        self._robot_totes[robot.id] = list(totes)
+        for t in totes:
+            self.order_mgr.record_assign(t, self.now)
+        robot.assign_trip([t.loc for t in totes], self._needed_docks(robot))
         self._schedule_next(robot)
 
     def distance_per_completed_order(self) -> float:
@@ -549,11 +588,11 @@ class SimulatorBase:
         return self._total_sim_distance / n if n > 0 else 0.0
 
     def avg_totes_per_trip(self) -> float:
-        """트립당 평균 완료 주문 수"""
-        return self.order_mgr.completed_count() / max(1, self._total_trips)
+        """완료된 트립당 평균 하역 토트 수"""
+        return self._totes_in_trips / max(1, self._total_trips)
 
     def saving_per_insertion(self) -> float:
-        """mid-trip 삽입 1건당 절감 이동거리 (m) = 단독 왕복거리 − 삽입당 추가 이동거리
+        """mid-trip 삽입 1건당 절감 이동거리 (m) = 토트 1개 단독 왕복거리 − 삽입당 추가 이동거리
 
         출력:
             절감 이동거리, 삽입이 없으면 0.0
@@ -563,8 +602,7 @@ class SimulatorBase:
         extra_per = self._extra_travel / self._mid_trip_count
         return self.layout.solo_rt_m - extra_per
 
-    def build_result(self, label: str, episode: int, lam: float,
-) -> EpisodeResult:
+    def build_result(self, label: str, episode: int, lam: float) -> EpisodeResult:
         """현재 에피소드 지표를 EpisodeResult로 묶음
 
         입력:
@@ -574,19 +612,22 @@ class SimulatorBase:
         출력:
             EpisodeResult
         """
+        om = self.order_mgr
         return EpisodeResult(
             label                = label,
             episode              = episode,
             lam                  = lam,
             num_robots           = self.num_robots,
-            n_completed          = self.order_mgr.completed_count(),
-            n_arrived            = len(self.order_mgr.all_orders),
-            avg_flow_time        = self.order_mgr.avg_flow_time(),
-            avg_wait_time        = self.order_mgr.avg_wait_time(),
+            n_completed          = om.completed_count(),
+            n_arrived            = len(om.all_orders),
+            avg_flow_time        = om.avg_flow_time(),
+            avg_wait_time        = om.avg_wait_time(),
             dist_per_order       = self.distance_per_completed_order(),
+            n_totes              = len(om.all_totes),
+            n_totes_done         = om.totes_done_count(),
             total_distance       = self._total_sim_distance,
             avg_totes_per_trip   = self.avg_totes_per_trip(),
-            mid_trip_rate        = self._mid_trip_count / max(1, self.order_mgr.completed_count()),
+            mid_trip_rate        = self._mid_trip_count / max(1, om.totes_done_count()),
             extra_travel_m       = self._extra_travel,
             saving_per_insertion = self.saving_per_insertion(),
             blocked_time         = self._blocked_time,
@@ -721,18 +762,17 @@ class SimulatorBase:
                     r.timer, kind = 0.0, r.timer_kind
                     r.timer_kind = None
                     done.add(r.id)
-                    if kind == "pick":
-                        self._grid_after_node(r)
-                    else:
-                        self._grid_finish_trip(r)
+                    if kind == "ws":
+                        self._grid_finish_drop(r)
+                    self._grid_after_node(r)
         return done
 
-    def _grid_next_pick(self, r: Robot, loc, skip: int = 0) -> Optional[Order]:
-        """r이 loc에서 아직 집지 않은 주문 중 배정 순서로 (skip+1)번째"""
-        for o in self._robot_orders[r.id]:
-            if not o.picked and o.loc == loc:
+    def _grid_next_pick(self, r: Robot, loc, skip: int = 0) -> Optional[Tote]:
+        """r이 loc에서 아직 집지 않은 토트 중 배정 순서로 (skip+1)번째"""
+        for t in self._robot_totes[r.id]:
+            if not t.picked and t.loc == loc:
                 if skip == 0:
-                    return o
+                    return t
                 skip -= 1
         return None
 
@@ -741,48 +781,67 @@ class SimulatorBase:
         return int(math.ceil(seconds / self.layout.tick - 1e-9)) if seconds > 0.0 else 0
 
     def _grid_on_arrive(self, r: Robot):
-        """r이 current_dest 셀에 들어섰을 때: 피킹 셀이면 피킹 시간을 시작하고, 아니면 바로 다음 단계로"""
-        if not self.layout.is_dock(r.pos):
-            o = self._grid_next_pick(r, r.pos)
-            if o is not None:
-                o.picked = True
-                if o.pick_s > 0.0:
-                    r.timer, r.timer_kind = o.pick_s, "pick"
+        """r이 current_dest 셀에 들어섰을 때
+
+        - 피킹 셀: 아직 집지 않은 토트 하나를 집고 피킹 시간 시작
+        - 도킹 셀: 이 WS로 갈 토트 중 이미 집은 것을 모두 내리고 처리 시간 합만큼 머묾
+        그 밖에는 바로 다음 단계로
+        """
+        L = self.layout
+        if L.is_dock(r.pos):
+            k    = L.dock_ws[r.pos]
+            drop = [t for t in self._robot_totes[r.id] if t.picked and t.ws_id == k]
+            if drop:
+                self._robot_totes[r.id] = [t for t in self._robot_totes[r.id] if t not in drop]
+                self._dropping[r.id] = drop
+                proc = sum(t.proc_s for t in drop)
+                if proc > 0.0:
+                    r.timer, r.timer_kind = proc, "ws"
+                    return
+                self._grid_finish_drop(r)
+        else:
+            t = self._grid_next_pick(r, r.pos)
+            if t is not None:
+                t.picked = True
+                if t.pick_s > 0.0:
+                    r.timer, r.timer_kind = t.pick_s, "pick"
                     return
         self._grid_after_node(r)
 
+    def _grid_finish_drop(self, r: Robot):
+        """도킹 셀에서 처리를 마친 토트 완료 기록 (주문의 마지막 토트면 주문 완료)"""
+        self._trip_totes[r.id] += len(self._dropping[r.id])
+        for t in self._dropping[r.id]:
+            self._ws_load[t.ws_id] -= 1
+            if self.order_mgr.record_tote_done(t, self.now):
+                o = t.order
+                self._n_in_system -= 1
+                self._completions.append((self.now, o.completion_time - o.arrival_time))
+        self._dropping[r.id] = []
+
     def _grid_after_node(self, r: Robot):
-        """경유지 처리를 마친 뒤 다음 목적지로 보내거나, 복귀 도킹 셀이면 워크스테이션 처리 시작"""
+        """방문 지점 처리를 마친 뒤 다음 목적지로 보내거나, 남은 지점이 없으면 트립 완료"""
         if r.arrive_at_node():
             self._schedule_next(r)
             return
-        if self.reserve and r.pending_insert and r.pos == r.workstation:
-            # 삽입 계획에 실패한 채 도킹 셀에 오면 내리지 않고 대기 주문을 경로에 넣어 재출발
+        if self.reserve and r.pending_insert:
+            # 삽입 계획에 실패한 채 마지막 도킹 셀에 오면 하역 후 대기 토트를 경로에 넣어 재출발
             locs, r.pending_insert = r.pending_insert, []
-            slots = r.idle_slots
-            for loc in locs:
-                r.insert_and_reorder(loc, self.layout)
-            r.idle_slots = slots
+            r.reroute(locs, self._needed_docks(r))
             r._start_move()
             self._reserve_plan(r)
             return
-        if r.pos == r.workstation:
-            proc = sum(o.proc_s for o in self._robot_orders[r.id])
-            if proc > 0.0:
-                r.timer, r.timer_kind = proc, "ws"
-            else:
-                self._grid_finish_trip(r)
-        else:
-            r.current_dest = r.workstation
-            self._schedule_next(r)
+        if self._robot_totes[r.id]:
+            raise RuntimeError(f"로봇 {r.id}: 방문 지점이 끝났는데 하역하지 않은 토트가 남음 (t={self.now:.0f})")
+        self._grid_finish_trip(r)
 
     def _grid_finish_trip(self, r: Robot):
-        """워크스테이션 처리 후 트립 완료 (대기 주문이 있으면 바로 새 트립)
+        """마지막 도킹 셀 처리 후 트립 완료 (대기 토트가 있으면 바로 새 트립)
 
         새 트립이 없으면 idle 로봇은 주차 칸으로 이동
         """
         if r.pending_insert:
-            raise RuntimeError(f"로봇 {r.id}: 삽입 대기 주문 {r.pending_insert}이 남은 채 트립 완료 (t={self.now:.0f})")
+            raise RuntimeError(f"로봇 {r.id}: 삽입 대기 토트 {r.pending_insert}이 남은 채 트립 완료 (t={self.now:.0f})")
         self._on_trip_complete(r)
         if r.is_idle and r.current_dest is None and not self.reserve:
             self._grid_assign_spot(r)
@@ -821,52 +880,60 @@ class SimulatorBase:
         if k % 600 == 0:
             self._res.prune(k - 1)
 
+    def _reserve_legs(self, r: Robot) -> Tuple[int, List[Tuple[Cell, int]]]:
+        """r의 남은 방문 지점을 (셀, 머무는 틱) 목록으로 변환
+
+        - 피킹 셀: 그 셀에서 집을 토트의 피킹 시간
+        - 도킹 셀: 그 시점까지 집은 토트 중 그 WS로 갈 것의 처리 시간 합 (_grid_on_arrive와 같은 규칙)
+        - 같은 피킹 셀을 연달아 방문하면 한 번 들러 피킹 시간 합만큼 머묾
+        출력:
+            (지금 위치에서 먼저 머물 틱 (피킹/처리 중이면 남은 시간), legs)
+        """
+        L = self.layout
+        stay0  = self._grid_ticks(r.timer) if r.timer > 0.0 else 0
+        visits = ([r.current_dest] if r.current_dest is not None and r.timer == 0.0 else []) + r.stops
+        held   = [t for t in self._robot_totes[r.id] if t.picked]
+        seen: Dict[Cell, int] = {}
+        legs: List[Tuple[Cell, int]] = []
+        for c in visits:
+            if L.is_dock(c):
+                k = L.dock_ws[c]
+                d = self._grid_ticks(sum(t.proc_s for t in held if t.ws_id == k))
+                held = [t for t in held if t.ws_id != k]
+                legs.append((c, d))
+                continue
+            t = self._grid_next_pick(r, c, seen.get(c, 0))
+            seen[c] = seen.get(c, 0) + 1
+            d = 0
+            if t is not None:
+                d = self._grid_ticks(t.pick_s)
+                held.append(t)
+            if legs and legs[-1][0] == c:
+                legs[-1] = (c, legs[-1][1] + d)
+            elif not legs and r.timer_kind == "pick" and c == r.pos:
+                stay0 += d
+            else:
+                legs.append((c, d))
+        return stay0, legs
+
     def _reserve_plan(self, r: Robot) -> bool:
         """r의 남은 트립 전체를 시공간 경로로 계획해 예약표에 등록. 성공 여부 반환
 
-        경로: (피킹 중이면 남은 피킹 시간만큼 대기) -> current_dest -> 남은 경유지 (NNH 순서)
-              -> 복귀 도킹 셀 (처리 시간만큼 머묾) -> 빈 주차 칸 (무기한 머묾)
+        경로: (피킹/처리 중이면 남은 시간만큼 대기) -> current_dest -> 남은 피킹 셀 (NNH 순서)
+              -> 도킹 셀들 (각각 하역 토트 처리 시간만큼 머묾) -> 마지막 WS의 빈 주차 칸 (무기한 머묾)
         계획 시작 틱(self._t0_ctx) 이후 예약은 지우고 다시 계획
         실패하면 지운 예약을 복원하고 replan_pending으로 표시해 다음 틱에 재시도
         """
         L, tab = self.layout, self._res
         t0 = self._t0_ctx
-        dt = L.tick
         wall = time.perf_counter()
         idx = L.cell_index
         removed, old_rest = tab.clear_after(r.id, t0)
         old_spot = r.park_spot
         self._spots_taken.discard(old_spot)
 
-        # 방문 목록 [(셀, 머무는 틱)]. 같은 셀을 연달아 방문하면 한 번 들러 피킹 시간 합만큼 머묾
-        stay0 = 0
-        visits = []
-        if r.timer_kind == "pick":
-            stay0 = self._grid_ticks(r.timer)
-        elif r.current_dest is not None:
-            visits.append(r.current_dest)
-        visits += list(r.route)
-        if not (visits and visits[-1] == r.workstation and not r.route):
-            visits.append(r.workstation)
-        proc_s = sum(o.proc_s for o in self._robot_orders[r.id])
-        seen: Dict[Tuple[int, int], int] = {}
-        legs = []
-        for i, c in enumerate(visits):
-            if L.is_dock(c):
-                d = self._grid_ticks(proc_s) if i == len(visits) - 1 else 0
-            else:
-                o = self._grid_next_pick(r, c, seen.get(c, 0))
-                seen[c] = seen.get(c, 0) + 1
-                d = self._grid_ticks(o.pick_s) if o is not None else 0
-            if not L.is_dock(c) and ((legs and legs[-1][0] == c) or (not legs and r.timer_kind == "pick" and c == r.pos)):
-                if legs:
-                    legs[-1] = (c, legs[-1][1] + d)
-                else:
-                    stay0 += d
-                continue
-            legs.append((c, d))
-
-        cells, cur, t, ok = [], idx[r.pos], t0, True
+        stay0, legs = self._reserve_legs(r)
+        cells, cur, ok = [], idx[r.pos], True
         for tt in range(t0 + 1, t0 + stay0 + 1):
             if not tab.can_enter(cur, cur, tt, r.id):
                 ok = False
@@ -885,7 +952,7 @@ class SimulatorBase:
         spot = None
         if ok:
             ok = False
-            for cand in L.spots_by_dist[L.dock_ws[r.workstation]]:
+            for cand in L.spots_by_dist[r.workstation_id]:
                 if cand in self._spots_taken:
                     continue
                 res = plan_leg(tab, L.out_nbrs, L.dist_to(cand), r.id, cur, t, idx[cand], 0, final=True)
@@ -914,21 +981,19 @@ class SimulatorBase:
         self._plan_time += time.perf_counter() - wall
         return ok
 
-    def _reserve_insert(self, r: Robot, locs: List[Tuple[int, int]]) -> bool:
+    def _reserve_insert(self, r: Robot, locs: List[Cell]) -> bool:
         """이동 중인 r의 경로에 locs를 삽입하고 재계획
 
         계획에 실패하면 경로 변경을 되돌리고 locs를 삽입 대기(pending_insert)로 둠
         r은 이전 계획대로 계속 움직이고 다음 틱에 재시도
         빈 슬롯 수는 배정 시점에 이미 줄여 두므로 되돌리지 않음
         """
-        snap = (list(r.route), r.workstation, r.workstation_id, r.idle_slots, r.route_version)
-        for loc in locs:
-            r.insert_and_reorder(loc, self.layout)
-        r.idle_slots = snap[3]
+        snap = (list(r.route), list(r.drops), r.workstation, r.workstation_id, r.route_version)
+        r.reroute(r.route + list(locs), self._needed_docks(r))
         if self._reserve_plan(r):
             r.pending_insert = []
             return True
-        r.route, r.workstation, r.workstation_id, _, r.route_version = snap
+        r.route, r.drops, r.workstation, r.workstation_id, r.route_version = snap
         r.pending_insert = list(locs)
         r.replan_pending = True
         return False

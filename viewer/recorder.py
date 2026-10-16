@@ -28,13 +28,13 @@ class Recorder:
         self.prev_pos = [r.pos for r in sim.robots]
         self.route_ev: List[list] = []       # [틱, 로봇, [방문 셀 인덱스...]]
         self.plan_ev:  List[list] = []       # [시작 틱, 로봇, [셀 인덱스...]]
-        self.assigned: Dict[int, int] = {}  # 주문 id -> 로봇
+        self.assigned: Dict[int, int] = {}  # 토트 id -> 로봇
         self.metrics = {k: array("f") for k in
                         ("t", "in_system", "queue", "busy", "waiting", "completed", "avg_flow")}
         self.occ  = np.zeros(len(L.cells), dtype=np.int32)
         self.wait = np.zeros(len(L.cells), dtype=np.int32)
         self._route_key = [None] * self.M
-        self._onboard   = [dict() for _ in range(self.M)]   # 로봇별 직전 틱 적재 주문
+        self._n_done    = 0                                  # sim._completions에서 읽은 개수
         self._recent    = deque()                            # (완료 시각, 흐름시간), 최근 10분
         self._append_frame(sim, 0, moved=None)
 
@@ -74,23 +74,20 @@ class Recorder:
                 n_wait += 1
                 self.wait[L.cell_index[r.pos]] += 1
             self.occ[L.cell_index[r.pos]] += 1
-            orders = sim._robot_orders.get(r.id, [])
-            self.frames += bytes((r.pos[0], r.pos[1], st, min(255, len(orders))))
+            totes = sim._robot_totes.get(r.id, [])
+            self.frames += bytes((r.pos[0], r.pos[1], st, min(255, len(totes))))
             # 경로 변경 기록
-            key = (r.current_dest, tuple(r.route), r.workstation)
+            key = (r.current_dest, tuple(r.stops), r.workstation)
             if key != self._route_key[i]:
                 self._route_key[i] = key
-                visits = ([r.current_dest] if r.current_dest is not None else []) + list(r.route)
+                visits = ([r.current_dest] if r.current_dest is not None else []) + r.stops
                 self.route_ev.append([k, r.id, [L.cell_index[c] for c in visits], L.cell_index[r.workstation]])
-            now_ids = {}
-            for o in orders:
-                now_ids[o.order_id] = o
-                if o.order_id not in self.assigned:
-                    self.assigned[o.order_id] = r.id
-            for oid, o in self._onboard[i].items():
-                if oid not in now_ids and o.completion_time is not None:
-                    self._recent.append((o.completion_time, o.completion_time - o.arrival_time))
-            self._onboard[i] = now_ids
+            for t in totes:
+                if t.tote_id not in self.assigned:
+                    self.assigned[t.tote_id] = r.id
+        comp = sim._completions
+        self._recent.extend(comp[self._n_done:])
+        self._n_done = len(comp)
         self.last_k = k
         if k % METRIC_EVERY == 0:
             om = sim.order_mgr
@@ -109,13 +106,15 @@ class Recorder:
             m["avg_flow"].append(sum(f for _, f in rec) / len(rec) if rec else float("nan"))
 
     def result(self, sim) -> dict:
-        """뷰어로 보낼 기록 (위치 프레임은 base64 바이트)"""
+        """뷰어로 보낼 기록 (위치 프레임은 base64 바이트)
+
+        orders: 토트마다 [주문 id, 도착, 배정, WS 처리 완료, 피킹 셀, SKU, 로봇, WS] (도착 순)
+        """
         L = sim.layout
-        orders = [[o.order_id, round(o.arrival_time, 2),
-                   None if o.service_start_time is None else round(o.service_start_time, 2),
-                   None if o.completion_time is None else round(o.completion_time, 2),
-                   L.cell_index[o.loc], o.sku, self.assigned.get(o.order_id, -1)]
-                  for o in sim.order_mgr.all_orders]
+        r2 = lambda v: None if v is None else round(v, 2)
+        orders = [[t.order.order_id, round(t.order.arrival_time, 2), r2(t.assign_time), r2(t.done_time),
+                   L.cell_index[t.loc], t.sku, self.assigned.get(t.tote_id, -1), t.ws_id]
+                  for t in sim.order_mgr.all_totes]
         return {
             "n_ticks": self.last_k + 1, "dt": self.dt, "M": self.M,
             "frames": base64.b64encode(bytes(self.frames)).decode(),
