@@ -6,6 +6,7 @@
 
 /api/run: 시뮬레이션을 끝까지 돌린 기록 반환 (재생은 브라우저에서)
 /api/export: 실행 하나를 단독 HTML 파일로 다운로드
+/api/checkpoint: RL 체크포인트의 학습 조건
 """
 import argparse
 import json
@@ -81,6 +82,8 @@ class Handler(BaseHTTPRequestHandler):
                     while len(RUNS) > MAX_RUNS:
                         RUNS.popitem(last=False)
                 self._json(res)
+            elif u.path == "/api/checkpoint":
+                self._json(runner.read_checkpoint_meta(body["path"]))
             else:
                 self._json({"error": "not found"}, 404)
         except Exception as e:

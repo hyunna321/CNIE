@@ -12,6 +12,8 @@ from __future__ import annotations
 from collections import deque
 from typing import TYPE_CHECKING, Callable, List, Tuple
 
+from constant import ROBOT_SPEED
+
 if TYPE_CHECKING:
     from grid import GridWarehouseLayout
 
@@ -182,6 +184,29 @@ class Robot:
             self.current_dest = self.route.pop(0)
         elif self.drops:
             self.current_dest = self.drops.pop(0)
+
+    def state_vector(self, max_time: float) -> List[float]:
+        """RL 특징용 로봇 상태 (트립 마지막 워크스테이션 기준 상대좌표, layout.coord_norm으로 정규화)
+
+        입력:
+            max_time: 잔여 이동시간 정규화 기준 (s)
+        출력:
+            길이 5 + capacity*2 리스트
+            [상대 x, 상대 y, 빈 슬롯 비율, idle 여부, 잔여 이동시간, 남은 피킹 셀(current_dest 제외) 상대좌표 (0 패딩)...]
+        """
+        wx, wy = self.workstation
+        norm   = self.layout.coord_norm
+        vec = [
+            (self.pos[0] - wx) / norm,
+            (self.pos[1] - wy) / norm,
+            self.idle_slots / self.capacity,
+            float(self.is_idle),
+            min(self.remaining_distance / ROBOT_SPEED / max_time, 1.0),
+        ]
+        for p in self.route[:self.capacity]:
+            vec += [(p[0] - wx) / norm, (p[1] - wy) / norm]
+        vec += [0.0] * (5 + 2 * self.capacity - len(vec))
+        return vec
 
     def _md(self, p1, p2):
         """통로 그래프 거리 (layout.aisle_distance 단축)"""

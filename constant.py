@@ -55,3 +55,49 @@ COST_DIST = 1.0    # order·s / m, BL6 한계비용에서 이동거리 1m를 흐
 N_EVAL         = 20
 EVAL_SEED_BASE = 10000
 OUT_DIR        = "logs"
+
+# RL (DQN, 후보 스코어링)
+GAMMA                 = 0.99
+LR                    = 3e-4
+BATCH_SIZE            = 128
+REPLAY_BUFFER_SIZE    = 50_000
+TARGET_UPDATE_STEPS   = 200
+EPS_START             = 1.0
+EPS_MIN               = 0.02
+EPS_DECAY             = 0.997
+GRAD_CLIP             = 10.0
+N_STEP                = 3
+MAX_CANDIDATES        = 8
+MAX_CANDIDATES_MARGIN = 3       # max_candidates = max(MAX_CANDIDATES, num_robots + margin)
+
+PER_ALPHA        = 0.6
+PER_BETA_START   = 0.4
+PER_BETA_END     = 1.0
+PER_PRIORITY_EPS = 1e-6
+
+STATE_MAX_TIME  = 300.0   # s, 잔여 시간 정규화 기준
+DELTA_NORM_CLIP = 3.0     # 정규화된 삽입 detour 상한
+
+# 보상 모드: "legacy" (배정 시점 보상), "smdp" (구간 비용 적분), "smdp_w" (smdp + wait 행동 + shaping)
+REWARD_MODES        = ("legacy", "smdp", "smdp_w")
+REWARD_GAMMA_Q        = 0.3    # legacy: 큐 압박 페널티 가중치
+REWARD_ALPHA_MID      = 2.0    # legacy: mid-trip 삽입 detour 감쇠 계수
+REWARD_ALPHA_IDLE     = 1.0    # legacy: idle 로봇 배정 detour 감쇠 계수
+REWARD_BETA_DEPLETION = 0.2    # legacy: 마지막 빈 idle 로봇 소진 페널티
+
+# SMDP 보상 (smdp, smdp_w 공통) / wait 관련은 smdp_w 전용
+SMDP_BETA         = 1 / 300   # 1/s, 연속시간 할인율 (≈ 트립 시간 규모)
+SMDP_COST_DIST    = 1.0       # order·s / m, 이동거리 1m를 흐름시간 몇 초로 환산할지
+SMDP_REWARD_SCALE = 1000.0    # 보상 정규화 분모
+SMDP_WAIT_KAPPA   = 1.0       # 대기 토트 나이 가중
+SMDP_WAIT_TREF    = 60.0      # s, 나이 정규화 기준 T_w
+SMDP_IA_EMA       = 0.05      # 주문 도착 간격 지수이동평균 계수
+SMDP_IA_NORM      = 10.0      # s, 도착 간격 정규화 기준
+WS_TIME_NORM      = 60.0      # s, 워크스테이션 처리 시간/작업량 정규화 기준
+
+# RL 학습
+TOTAL_EPISODES        = 1000
+VERBOSE_EVERY         = 50
+CURRICULUM_LAM_MARGIN = 0.7    # 커리큘럼 λ 하한 = lam × margin
+UPDATE_RATIO          = 8      # 결정 N개당 train_step 1회
+RL_OUT_DIR            = "logs_rl"

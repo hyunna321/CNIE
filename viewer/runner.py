@@ -1,10 +1,11 @@
 """뷰어 설정으로 그리드 시뮬레이션을 한 번 실행하고 기록 반환"""
+import glob
 import os
 import subprocess
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
-from constant import DEFAULT_SEED, ROBOT_CAPACITY
+from constant import DEFAULT_SEED, ROBOT_CAPACITY, SIM_TIME
 from grid import GridWarehouseLayout, RACK, AISLE, CROSS, WS_ZONE
 from scenario import Scenario, ARRIVALS, SKU_DISTS, STORAGES, TIME_DISTS
 from viewer.recorder import Recorder
@@ -18,7 +19,24 @@ POLICIES = {
     "BL4": "BL4 Nearest",
     "BL5": "BL5 Min-Insertion",
     "BL6": "BL6 Marginal-Cost",
+    "RL":  "RL (checkpoint)",
 }
+
+
+def find_checkpoints() -> List[str]:
+    """저장소 안의 체크포인트(*.pt) 경로 (가상환경 제외, 최근 수정 순)"""
+    paths = [p for p in glob.glob(os.path.join(REPO, "**", "*.pt"), recursive=True)
+             if "/.venv/" not in p and "/site-packages/" not in p]
+    paths.sort(key=os.path.getmtime, reverse=True)
+    return [os.path.relpath(p, REPO) for p in paths]
+
+
+def read_checkpoint_meta(path: str) -> dict:
+    """체크포인트의 용량/로봇 수/WS 수/특징 세트와 학습 조건(meta)"""
+    import torch
+    ckpt = torch.load(_abs(path), map_location="cpu")
+    return {k: ckpt.get(k) for k in ("robot_capacity", "num_robots", "num_workstations", "sim_time",
+                                     "feature_set")} | {"meta": ckpt.get("meta", {})}
 
 
 def meta() -> dict:
@@ -29,6 +47,7 @@ def meta() -> dict:
         "enums": {"arrival": ARRIVALS, "sku_dist": SKU_DISTS, "storage": STORAGES,
                   "pick_dist": TIME_DISTS, "ws_proc_dist": TIME_DISTS,
                   "traffic": ["free", "lanes"], "motion": ["reserve", "reactive"]},
+        "checkpoints": find_checkpoints(),
         "git": _git_rev(),
     }
 
@@ -75,9 +94,12 @@ def run(cfg: Dict) -> dict:
     policy   = cfg.get("policy", "BL6")
     warnings = []
     kw = dict(lam=lam, seed=seed, sim_time=T, num_robots=M, robot_capacity=cap)
-    cls = {"BL1": FullBufferSimulator, "BL2": PartialSimulator, "BL3": RandomAssignSimulator,
-           "BL4": NearestRobotSimulator, "BL5": MinInsertionSimulator, "BL6": MarginalCostSimulator}[policy]
-    sim = cls(L, **kw)
+    if policy == "RL":
+        sim = _rl_simulator(cfg, L, sc, M, K, cap, warnings, kw)
+    else:
+        cls = {"BL1": FullBufferSimulator, "BL2": PartialSimulator, "BL3": RandomAssignSimulator,
+               "BL4": NearestRobotSimulator, "BL5": MinInsertionSimulator, "BL6": MarginalCostSimulator}[policy]
+        sim = cls(L, **kw)
     rec = Recorder()
     sim.recorder = rec
     sim.reset(seed)
@@ -92,6 +114,49 @@ def run(cfg: Dict) -> dict:
         "trace": rec.result(sim), "summary": summary, "warnings": warnings,
         "git": _git_rev(), "wall_s": round(time.time() - t_wall, 2),
     }
+
+
+def _rl_simulator(cfg: Dict, L, sc: Scenario, M: int, K: int, cap: int, warnings: List[str], kw: Dict):
+    """체크포인트를 불러와 ε = 0 RLSimulator 생성 (보상 모드는 체크포인트 학습 조건을 따름)"""
+    from agents import DQNAgent
+    from rl_simulator import RLSimulator
+    path = cfg.get("checkpoint")
+    if not path:
+        raise ValueError("RL 정책은 체크포인트 경로가 필요합니다")
+    info = read_checkpoint_meta(path)
+    if info["robot_capacity"] != cap:
+        raise ValueError(f"체크포인트 로봇 용량 {info['robot_capacity']} ≠ 설정 {cap} (특징 차원이 달라 불러올 수 없습니다)")
+    fs = info.get("feature_set") or "base"
+    agent = DQNAgent(robot_capacity=cap, num_robots=M, num_workstations=K,
+                     sim_time=info.get("sim_time") or SIM_TIME, feature_set=fs)
+    try:
+        agent.load(_abs(path))
+    except RuntimeError:
+        raise ValueError("체크포인트 특징 차원이 지금 코드와 다릅니다 (토트 단위 이식 전 체크포인트일 수 있음)")
+    m = info.get("meta") or {}
+    reward_mode = m.get("reward_mode") or ("smdp_w" if fs == "smdp_w" else "smdp")
+    warnings += _ckpt_warnings(m, cfg, sc, M, K)
+    return RLSimulator(L, agent, eval_mode=True, reward_mode=reward_mode, **kw)
+
+
+def _ckpt_warnings(m: dict, cfg: dict, sc: Scenario, M: int, K: int) -> List[str]:
+    """체크포인트 학습 조건과 지금 설정이 다르면 경고"""
+    if not m:
+        return ["학습 조건 기록이 없는 체크포인트입니다."]
+    out = []
+    if (m.get("traffic"), m.get("motion")) != (cfg.get("traffic", "free"), cfg.get("motion", "reserve")):
+        out.append(f"학습 이동 규칙 {m.get('traffic')}/{m.get('motion')}과 지금 설정이 다릅니다.")
+    if m.get("num_robots") != M or m.get("num_workstations") != K:
+        out.append(f"학습 조건 M={m.get('num_robots')}, K={m.get('num_workstations')}와 지금 설정이 다릅니다.")
+    if m.get("lam") and abs(m["lam"] * 3600 - float(cfg.get("lam_hr", 320))) > 1:
+        out.append(f"학습 λ={m['lam'] * 3600:.0f}/hr와 지금 λ가 다릅니다.")
+    if m.get("scenario") and m["scenario"] != sc.to_dict():
+        out.append("학습 시나리오(분포)와 지금 시나리오가 다릅니다.")
+    return out
+
+
+def _abs(path: str) -> str:
+    return path if os.path.isabs(path) else os.path.join(REPO, path)
 
 
 def _scenario_from(d: dict) -> Scenario:
