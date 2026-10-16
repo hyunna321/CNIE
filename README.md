@@ -15,9 +15,9 @@
 | `metrics.py` | 에피소드 지표, CSV 저장, 비교표 |
 | `run.py` | 정책 평가 실행 |
 | `agents.py` | DQN 에이전트, (토트, 후보 로봇) 특징 |
-| `rl_simulator.py` | RL 배정 시뮬레이터 (SMDP + wait, 비용 적분, shaping) |
+| `rl_simulator.py` | RL 배정 시뮬레이터 (보상 모드 legacy / smdp / smdp_w) |
 | `training.py` | RL 학습 루프, ε = 0 평가 |
-| `run_rl.py` | RL 학습/평가 후 베이스라인과 비교 |
+| `run_rl.py` | RL arm 학습/평가 후 베이스라인과 비교, 결과 요약 |
 
 ## 평가
 
@@ -29,9 +29,10 @@ python run.py --policies BL4 BL6 --lam 280 --robots 18 --n-eval 5 --motion react
 ## RL
 
 ```bash
-python run_rl.py                                     # 1000 에피소드 학습 후 RL vs BL4~BL6 평가 (torch 필요)
-python run_rl.py --episodes 200 --baselines BL6 --n-eval 5
-python run_rl.py --load logs_rl/.../agent.pt         # 체크포인트 평가만
+python run_rl.py                                     # smdpw_r8 arm, 1000 에피소드 학습 후 RL vs BL4~BL6 평가 (torch 필요)
+python run_rl.py --arm smdp_r8_bl6 --episodes 200 --baselines BL6 --n-eval 5
+python run_rl.py --arm smdpw_r8 --load logs_rl/.../agent.pt   # 체크포인트 평가만
+python run_rl.py --summarize                         # 설정별 arm/베이스라인 흐름시간, BL6 대비 차이
 ```
 
 ## 시뮬레이션 뷰어
@@ -40,6 +41,6 @@ python run_rl.py --load logs_rl/.../agent.pt         # 체크포인트 평가만
 python -m viewer.server    # http://127.0.0.1:8765
 ```
 
-- 배정 정책(BL1~BL6), 로봇/워크스테이션 수, λ, 이동 규칙(free/lanes, reserve/reactive), 시나리오 분포를 골라 실행. 시뮬레이션을 끝까지 돌린 뒤 재생
+- 배정 정책(BL1~BL6, RL 체크포인트), 로봇/워크스테이션 수, λ, 이동 규칙(free/lanes, reserve/reactive), 시나리오 분포를 골라 실행. 시뮬레이션을 끝까지 돌린 뒤 재생
 - 시나리오 분포는 `scenario.py` 참고. 혼잡 상황은 프리셋에서 선택 가능
 - `Export replay`: 실행 하나를 HTML 파일로 저장. `replay.html#t=900&robot=3`처럼 시점과 로봇을 지정해 열기 가능

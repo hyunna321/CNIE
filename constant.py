@@ -78,7 +78,14 @@ PER_PRIORITY_EPS = 1e-6
 STATE_MAX_TIME  = 300.0   # s, 잔여 시간 정규화 기준
 DELTA_NORM_CLIP = 3.0     # 정규화된 삽입 detour 상한
 
-# SMDP + wait 보상
+# 보상 모드: "legacy" (배정 시점 보상), "smdp" (구간 비용 적분), "smdp_w" (smdp + wait 행동 + shaping)
+REWARD_MODES        = ("legacy", "smdp", "smdp_w")
+REWARD_GAMMA_Q        = 0.3    # legacy: 큐 압박 페널티 가중치
+REWARD_ALPHA_MID      = 2.0    # legacy: mid-trip 삽입 detour 감쇠 계수
+REWARD_ALPHA_IDLE     = 1.0    # legacy: idle 로봇 배정 detour 감쇠 계수
+REWARD_BETA_DEPLETION = 0.2    # legacy: 마지막 빈 idle 로봇 소진 페널티
+
+# SMDP 보상 (smdp, smdp_w 공통) / wait 관련은 smdp_w 전용
 SMDP_BETA         = 1 / 300   # 1/s, 연속시간 할인율 (≈ 트립 시간 규모)
 SMDP_COST_DIST    = 1.0       # order·s / m, 이동거리 1m를 흐름시간 몇 초로 환산할지
 SMDP_REWARD_SCALE = 1000.0    # 보상 정규화 분모

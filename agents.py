@@ -3,6 +3,10 @@
 - 결정 단위는 토트 (BL1~BL6과 같음). 토트의 WS는 주문 도착 시 정해져 있음
 - 행동: 후보 로봇 리스트 내 인덱스, wait가 허용되면 마지막 행이 wait
 - 후보마다 같은 RobotScoreNet으로 Q값을 내므로 로봇 수와 무관하게 네트워크 크기 고정
+- 특징 세트 (feature_set)
+  - "base"  : 토트 상대좌표, 삽입 detour, 로봇 상태, 컨텍스트
+  - "bl6"   : base + BL6 한계비용 구성요소 5
+  - "smdp_w": base + 쌍/토트 WS/wait 플래그/전역 14 (reward_mode="smdp_w" 전용)
 """
 import random
 import warnings
@@ -21,21 +25,24 @@ from constant import (
     EPS_START, EPS_MIN, EPS_DECAY, GRAD_CLIP, N_STEP,
     MAX_CANDIDATES, MAX_CANDIDATES_MARGIN,
     PER_ALPHA, PER_BETA_START, PER_BETA_END, PER_PRIORITY_EPS,
-    DELTA_NORM_CLIP, TOTAL_EPISODES, ROBOT_SPEED,
+    DELTA_NORM_CLIP, TOTAL_EPISODES, ROBOT_SPEED, SMDP_COST_DIST,
     STATE_MAX_TIME, WS_TIME_NORM,
 )
 
-WS_FEAT_DIM = 4                              # 워크스테이션 1곳의 상태 특징 수
-EXTRA_DIM   = 3 + WS_FEAT_DIM + 1 + 6        # 쌍 3 + 토트 WS 4 + wait 플래그 1 + 전역 6
+FEATURE_SETS     = ("base", "bl6", "smdp_w")
+BL6_EXTRA_DIM    = 5                              # feature_set="bl6"일 때 추가되는 특징 수
+WS_FEAT_DIM      = 4                              # 워크스테이션 1곳의 상태 특징 수
+SMDP_W_EXTRA_DIM = 3 + WS_FEAT_DIM + 1 + 6        # 쌍 3 + 토트 WS 4 + wait 플래그 1 + 전역 6
 
 
-def candidate_feature_dim(robot_capacity: int) -> int:
+def candidate_feature_dim(robot_capacity: int, feature_set: str = "smdp_w") -> int:
     """(토트, 후보 로봇) 쌍 특징벡터의 차원
 
     토트 상대좌표 2 + 삽입 detour 1 + 로봇 상태 (5 + capacity*2) + 컨텍스트 2 (큐 길이, 경과시간)
-    + EXTRA_DIM (DQNAgent.build_candidates 참고)
+    + feature_set별 추가 특징 (DQNAgent.build_candidates 참고)
     """
-    return 2 + 1 + (5 + robot_capacity * 2) + 2 + EXTRA_DIM
+    extra = {"base": 0, "bl6": BL6_EXTRA_DIM, "smdp_w": SMDP_W_EXTRA_DIM}[feature_set]
+    return 2 + 1 + (5 + robot_capacity * 2) + 2 + extra
 
 
 class RobotScoreNet(nn.Module):
@@ -169,7 +176,7 @@ class DQNAgent:
 
     def __init__(self, robot_capacity: int, seed: int = DEFAULT_SEED,
                  sim_time: float = SIM_TIME, num_robots: Optional[int] = None,
-                 num_workstations: int = NUM_WORKSTATIONS):
+                 num_workstations: int = NUM_WORKSTATIONS, feature_set: str = "smdp_w"):
         """
         입력:
             robot_capacity: 로봇 용량
@@ -177,12 +184,15 @@ class DQNAgent:
             sim_time: 경과시간 정규화 기준 (s)
             num_robots: 로봇 수 (최대 후보 수 결정)
             num_workstations: 워크스테이션 수 (기록용)
+            feature_set: "base", "bl6", "smdp_w" (모듈 설명 참고)
         """
+        assert feature_set in FEATURE_SETS, feature_set
+        self.feature_set      = feature_set
         self.robot_capacity   = robot_capacity
         self.sim_time         = sim_time
         self.num_robots       = num_robots
         self.num_workstations = num_workstations
-        self.feat_dim         = candidate_feature_dim(robot_capacity)
+        self.feat_dim         = candidate_feature_dim(robot_capacity, feature_set)
 
         # 후보 = 로봇 전원 + wait 1행
         if num_robots is not None:
@@ -212,17 +222,14 @@ class DQNAgent:
     def build_candidates(self, tote_loc: Tuple[int, int], ws_id: int, robots: List[Robot],
                          deltas: List[float], layout, ctx: Dict, now: float = 0.0,
                          with_wait: bool = False) -> np.ndarray:
-        """후보 로봇마다 (토트, 로봇) 특징벡터. with_wait이면 마지막 행이 wait 행동
+        """후보 로봇마다 (토트, 로봇) 특징벡터. with_wait이면 마지막 행이 wait 행동 (smdp_w 전용)
 
-        행 구성 (candidate_feature_dim):
+        공통 (base):
         - 토트 위치의 상대좌표 2 (후보 로봇의 트립 마지막 WS 기준), 삽입 detour 1
         - 로봇 상태 5 + capacity*2 (Robot.state_vector)
         - 컨텍스트 2: 대기 큐 길이 / (M·C), 경과시간 / sim_time
-        - 쌍 3: 적재 토트 지연, 새 토트 예상 하역 시각까지 시간, 남은 피킹 비율
-        - 토트 WS 4: 그 WS의 [도킹 잔여 처리 시간, 대기열 셀 점유율, 복귀 예정 로봇 수, 복귀 예정 작업량]
-          (후보 자신의 몫은 뺌)
-        - wait 플래그 1
-        - 전역 6: ctx["glob"] 5 + WS 예상 대기 평균
+        bl6: + _bl6_features 5
+        smdp_w: + _smdp_w_features 14
 
         입력:
             tote_loc: 토트 피킹 셀
@@ -230,42 +237,75 @@ class DQNAgent:
             robots: 후보 로봇 리스트
             deltas: 후보별 삽입 추가 이동거리 (m, SimulatorBase._insertion_delta)
             layout: GridWarehouseLayout
-            ctx: RLSimulator._context() 결과
+            ctx: RLSimulator._context() 결과 (base/bl6는 n_wait, num_robots만 사용)
             now: 현재 시각 (s)
             with_wait: wait 행동 행 추가 여부
         출력:
             (len(robots) + with_wait, feat_dim) float32 배열
         """
-        C, tn  = self.robot_capacity, STATE_MAX_TIME
-        cn, dn = layout.coord_norm, layout.dist_norm
-        M, ws  = ctx["num_robots"], ctx["ws"]
-        k      = ws_id
-        load     = float((ws[:, 0] + ws[:, 3]).mean())    # WS별 예상 대기 = 도킹 잔여 + 복귀 예정 작업량
-        base_ctx = [min(ctx["n_wait"] / (M * C), 1.0), min(now / self.sim_time, 1.0)]
-        tail     = ctx["glob"] + [min(load / WS_TIME_NORM, 5.0)]
+        assert not with_wait or self.feature_set == "smdp_w"
+        C, cn, dn = self.robot_capacity, layout.coord_norm, layout.dist_norm
+        base_ctx  = [min(ctx["n_wait"] / (ctx["num_robots"] * C), 1.0), min(now / self.sim_time, 1.0)]
+        tail      = self._smdp_w_tail(ctx) if self.feature_set == "smdp_w" else None
 
         feats = np.zeros((len(robots) + int(with_wait), self.feat_dim), dtype=np.float32)
         for i, (r, delta) in enumerate(zip(robots, deltas)):
             wx, wy = r.workstation
-            n_unpicked, t_left, own = ctx["robot"].get(r.id, (0, 0.0, {}))
-            onboard = C - r.idle_slots
-            eta     = delta / ROBOT_SPEED if r.is_idle else t_left + delta / ROBOT_SPEED
-            rem, occ, n_in, work = ws[k]
-            if k in own:                                   # 후보 자신은 복귀 예정 집계에서 제외
-                n_in, work = n_in - 1.0, work - own[k]
-            feats[i] = (
-                [(tote_loc[0] - wx) / cn, (tote_loc[1] - wy) / cn, min(delta / dn, DELTA_NORM_CLIP)]
-                + r.state_vector(STATE_MAX_TIME) + base_ctx
-                + [min(onboard * delta / ROBOT_SPEED / tn, 5.0), min(eta / tn, 3.0), n_unpicked / C]
-                + [min(rem / WS_TIME_NORM, 5.0), occ, n_in / M, min(work / WS_TIME_NORM, 5.0)]
-                + [0.0] + tail)
+            row = ([(tote_loc[0] - wx) / cn, (tote_loc[1] - wy) / cn, min(delta / dn, DELTA_NORM_CLIP)]
+                   + r.state_vector(STATE_MAX_TIME) + base_ctx)
+            if self.feature_set == "bl6":
+                row += self._bl6_features(r, delta, layout)
+            elif self.feature_set == "smdp_w":
+                row += self._smdp_w_features(r, delta, ws_id, ctx) + tail
+            feats[i] = row
         if with_wait:
-            wx, wy = layout.workstations[k]
+            wx, wy = layout.workstations[ws_id]
             feats[-1] = (
                 [(tote_loc[0] - wx) / cn, (tote_loc[1] - wy) / cn, 0.0]
                 + [0.0] * (5 + C * 2) + base_ctx
                 + [0.0] * (3 + WS_FEAT_DIM) + [1.0] + tail)
         return feats
+
+    def _bl6_features(self, r: Robot, delta: float, layout) -> List[float]:
+        """BL6(MarginalCostSimulator._marginal_cost)와 같은 식의 한계비용 구성요소 (정규화)
+
+        [적재 토트 비율, 적재 토트 지연, 배정 후 남은 거리, 추가 이동거리, 한계비용 합계]
+        정규화 기준: 거리는 layout.dist_norm, 시간은 dist_norm / 속도
+        """
+        onboard = self.robot_capacity - r.idle_slots
+        if r.is_idle:
+            remaining_after, delay_onboard = delta, 0.0
+        else:
+            remaining_after = r.remaining_distance + delta
+            delay_onboard   = onboard * delta / ROBOT_SPEED
+        mc = delay_onboard + remaining_after / ROBOT_SPEED + SMDP_COST_DIST * delta
+        dn, tn = layout.dist_norm, layout.dist_norm / ROBOT_SPEED
+        return [onboard / self.robot_capacity, min(delay_onboard / tn, 5.0), min(remaining_after / dn, 5.0),
+                min(delta / dn, 5.0), min(mc / tn, 10.0)]
+
+    def _smdp_w_features(self, r: Robot, delta: float, k: int, ctx: Dict) -> List[float]:
+        """smdp_w의 후보별 특징 8 (전역 6은 _smdp_w_tail)
+
+        - 쌍 3: 적재 토트 지연, 새 토트 예상 하역 시각까지 시간, 남은 피킹 비율
+        - 토트 WS 4: 그 WS의 [도킹 잔여 처리 시간, 대기열 셀 점유율, 복귀 예정 로봇 수, 복귀 예정 작업량]
+          (후보 자신의 몫은 뺌)
+        - wait 플래그 1 (= 0)
+        """
+        C, tn, M = self.robot_capacity, STATE_MAX_TIME, ctx["num_robots"]
+        n_unpicked, t_left, own = ctx["robot"].get(r.id, (0, 0.0, {}))
+        onboard = C - r.idle_slots
+        eta     = delta / ROBOT_SPEED if r.is_idle else t_left + delta / ROBOT_SPEED
+        rem, occ, n_in, work = ctx["ws"][k]
+        if k in own:                                   # 후보 자신은 복귀 예정 집계에서 제외
+            n_in, work = n_in - 1.0, work - own[k]
+        return ([min(onboard * delta / ROBOT_SPEED / tn, 5.0), min(eta / tn, 3.0), n_unpicked / C]
+                + [min(rem / WS_TIME_NORM, 5.0), occ, n_in / M, min(work / WS_TIME_NORM, 5.0)]
+                + [0.0])
+
+    def _smdp_w_tail(self, ctx: Dict) -> List[float]:
+        """smdp_w 전역 특징 6: ctx["glob"] 5 + WS 예상 대기(도킹 잔여 + 복귀 예정 작업량) 평균"""
+        ws = ctx["ws"]
+        return ctx["glob"] + [min(float((ws[:, 0] + ws[:, 3]).mean()) / WS_TIME_NORM, 5.0)]
 
     def _pad(self, feats: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """후보 특징을 max_candidates 길이로 0-패딩 (초과분은 경고 후 버림)
@@ -395,6 +435,7 @@ class DQNAgent:
             "num_robots":       self.num_robots,
             "num_workstations": self.num_workstations,
             "sim_time":         self.sim_time,
+            "feature_set":      self.feature_set,
             "meta":             meta or {},
         }, path)
 

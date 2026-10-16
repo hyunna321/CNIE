@@ -16,7 +16,8 @@ def train(layout, agent: DQNAgent, store: MetricsStore,
           total_episodes: int = TOTAL_EPISODES, sim_time: float = SIM_TIME,
           label: str = "RL", verbose_every: int = VERBOSE_EVERY,
           curve_store: Optional[TrainingCurveStore] = None,
-          update_ratio: Optional[float] = UPDATE_RATIO) -> None:
+          update_ratio: Optional[float] = UPDATE_RATIO,
+          reward_mode: str = "smdp_w") -> None:
     """RL 에이전트 학습
 
     - 앞쪽 절반 에피소드: λ를 [lam × CURRICULUM_LAM_MARGIN, lam]에서 무작위로 뽑는 커리큘럼
@@ -34,11 +35,13 @@ def train(layout, agent: DQNAgent, store: MetricsStore,
         label: 결과 라벨
         verbose_every: 진행 로그 출력 주기 (에피소드)
         curve_store: 학습 곡선 기록용 TrainingCurveStore (선택)
-        update_ratio: 결정 N개당 업데이트 1회
+        update_ratio: 결정 N개당 업데이트 1회 (None이면 에피소드당 1회)
+        reward_mode: "legacy", "smdp", "smdp_w" (rl_simulator 참고)
     """
     lam_lo, lam_hi = lam * CURRICULUM_LAM_MARGIN, lam
     sim = RLSimulator(layout, agent, lam=lam, seed=seed, sim_time=sim_time,
-                      num_robots=layout.num_robots, robot_capacity=layout.robot_capacity)
+                      num_robots=layout.num_robots, robot_capacity=layout.robot_capacity,
+                      reward_mode=reward_mode)
     rng = random.Random(seed)
 
     for ep in range(1, total_episodes + 1):
@@ -77,7 +80,8 @@ def train(layout, agent: DQNAgent, store: MetricsStore,
 
 
 def evaluate(layout, agent: DQNAgent, store: MetricsStore, lam: float,
-             seeds: List[int], sim_time: float = SIM_TIME, label: str = "RL") -> None:
+             seeds: List[int], sim_time: float = SIM_TIME, label: str = "RL",
+             reward_mode: str = "smdp_w") -> None:
     """학습된 에이전트를 ε = 0으로 평가 시드마다 한 번씩 실행해 기록
 
     입력:
@@ -88,11 +92,12 @@ def evaluate(layout, agent: DQNAgent, store: MetricsStore, lam: float,
         seeds: 평가 시드 리스트 (episode 번호 = 리스트 인덱스, run.evaluate와 같은 대응)
         sim_time: 시뮬레이션 시간 (s)
         label: 결과 라벨
+        reward_mode: 보상 기록 방식 (smdp_w면 wait 행동 허용, 정책 선택에 영향)
     """
     for i, s in enumerate(seeds):
         sim = RLSimulator(layout, agent, lam=lam, seed=s, sim_time=sim_time,
                           num_robots=layout.num_robots, robot_capacity=layout.robot_capacity,
-                          eval_mode=True)
+                          eval_mode=True, reward_mode=reward_mode)
         sim.reset(s)
         sim.run()
         r = sim.build_result(label, i, lam)
