@@ -1,8 +1,8 @@
 """그리드 시뮬레이션 평가 진입점: 배정 정책(BL1~BL6)을 같은 평가 시드로 돌려 비교
 
 사용법:
-    python run.py                              # BL1~BL6, λ=800/hr, M=14, K=3, 평가 시드 20개
-    python run.py --policies BL4 BL6 --lam 900 --robots 18 --n-eval 5
+    python run.py                              # BL1~BL6, λ=320 주문/hr, M=14, K=3, 평가 시드 20개
+    python run.py --policies BL4 BL6 --lam 280 --robots 18 --n-eval 5
 
     --traffic free|lanes       모든 방향 이동 / 일방통행 통로 + 차선 교차통로 (기본 free)
     --motion reserve|reactive  배정 시 시공간 경로 예약 / 막히면 대기·우회 (기본 reserve)

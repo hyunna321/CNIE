@@ -1,7 +1,8 @@
-"""주문 도착 과정, SKU 수요, 저장 위치, 피킹/워크스테이션 처리 시간 분포 설정
+"""주문 도착 과정, 주문 크기, SKU 수요, 저장 위치, 피킹/워크스테이션 처리 시간 분포 설정
 
-Scenario() 기본값: 포아송 도착, 균등 SKU 수요, 무작위 저장, 고정 피킹/처리 시간
-(constant.PICK_TIME, WS_PROC_TIME). SKU/위치와 포아송 도착 간격은 OrderManager._rng에서,
+Scenario() 기본값: 포아송 도착, 주문당 SKU 수 기하분포 (평균 constant.ORDER_LINES_MEAN),
+균등 SKU 수요, 무작위 저장, 고정 피킹/처리 시간 (constant.PICK_TIME, WS_PROC_TIME)
+주문 크기/SKU/위치와 포아송 도착 간격은 OrderManager._rng에서,
 그 밖의 도착 과정과 처리 시간은 별도 생성기(arrival_rng, time_rng)에서 추출
 
 참고 문헌:
@@ -16,7 +17,7 @@ import random
 from dataclasses import dataclass, asdict
 from typing import List, Tuple
 
-from constant import PICK_TIME, WS_PROC_TIME
+from constant import PICK_TIME, WS_PROC_TIME, ORDER_LINES_MEAN, ORDER_LINES_MAX
 
 ARRIVALS      = ("poisson", "nhpp_peak", "nhpp_sine", "batch", "renewal")
 SKU_DISTS     = ("uniform", "abc", "zipf")
@@ -37,6 +38,9 @@ class Scenario:
     batch_mean:     float = 5.0    # batch: 한 번에 들어오는 평균 주문 수 (묶음 도착 = 웨이브)
     batch_fixed:    bool  = False  # batch: True면 묶음 크기 고정, False면 기하분포
     scv:            float = 1.0    # renewal: 도착 간격의 변동계수 제곱 (0 일정, <1 Erlang, 1 지수, >1 초지수)
+    # 주문 크기: 주문 1건의 서로 다른 SKU 수 (SKU 1개 = 토트 1개). 1 + 기하분포, lines_max에서 절단
+    lines_mean:     float = ORDER_LINES_MEAN   # 절단 전 평균 (1이면 단일 SKU 주문)
+    lines_max:      int   = ORDER_LINES_MAX
     # SKU 수요 분포 (SKU id 0이 가장 인기)
     sku_dist:       str   = "uniform"
     abc_items:      float = 0.2    # abc: 상위 abc_items 비율의 SKU가
@@ -61,6 +65,9 @@ class Scenario:
             raise ValueError("nhpp_peak: peak_mult × peak_len이 1 이하여야 평균 λ를 맞출 수 있습니다")
         if self.arrival == "nhpp_sine" and not (0.0 <= self.sine_amp <= 1.0):
             raise ValueError("nhpp_sine: sine_amp는 0~1이어야 합니다")
+        self.lines_max = int(self.lines_max)
+        if self.lines_mean < 1.0 or self.lines_max < 1:
+            raise ValueError("lines_mean은 1 이상, lines_max는 1 이상이어야 합니다")
         if self.sku_dist == "abc" and not (0 < self.abc_items < 1 and 0 < self.abc_demand < 1):
             raise ValueError("abc: abc_items, abc_demand는 0과 1 사이여야 합니다")
 
@@ -73,15 +80,17 @@ class Scenario:
 
 
 class OrderStream:
-    """시나리오에 따라 주문 도착 시각/묶음 크기, SKU, 처리 시간 샘플링
+    """시나리오에 따라 주문 도착 시각/묶음 크기, 주문 크기, SKU, 처리 시간 샘플링
 
-    order_rng: SKU/위치, 포아송 도착 간격 (OrderManager._rng)
+    order_rng: 주문 크기/SKU/위치, 포아송 도착 간격 (OrderManager._rng)
     arrival_rng: 포아송이 아닌 도착 과정의 난수
     time_rng: 확률적 피킹/처리 시간의 난수
     """
 
     def __init__(self, sc: Scenario, lam: float, horizon: float, num_skus: int):
         self.sc, self.lam, self.horizon, self.num_skus = sc, lam, horizon, num_skus
+        if sc.lines_max > num_skus:
+            raise ValueError(f"lines_max {sc.lines_max} > SKU 수 {num_skus}")
         if sc.sku_dist == "abc":
             self._abc_s = math.log(sc.abc_demand) / math.log(sc.abc_items)
         if sc.sku_dist == "zipf":
@@ -143,7 +152,26 @@ class OrderStream:
         mu = 2.0 * p1 * lam if arrival_rng.random() < p1 else 2.0 * (1.0 - p1) * lam
         return t + arrival_rng.expovariate(mu), 1
 
-    # SKU
+    # 주문 크기 / SKU
+
+    def sample_lines(self, order_rng: random.Random) -> int:
+        """주문 1건의 SKU 수: 1 + 기하분포 (평균 lines_mean), lines_max에서 절단"""
+        m = self.sc.lines_mean
+        if m <= 1.0:
+            return 1
+        p = 1.0 / m
+        k = 1 + int(math.log(1.0 - order_rng.random()) / math.log(1.0 - p))
+        return min(k, self.sc.lines_max)
+
+    def sample_skus(self, order_rng: random.Random, sku_ids: List[int], n: int) -> List[int]:
+        """수요 분포에서 서로 다른 SKU n개 (중복이면 다시 뽑음)"""
+        out, seen = [], set()
+        while len(out) < n:
+            s = self.sample_sku(order_rng, sku_ids)
+            if s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
 
     def sample_sku(self, order_rng: random.Random, sku_ids: List[int]) -> int:
         sc = self.sc

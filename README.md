@@ -1,25 +1,25 @@
 # CNIE
 
-셀 그리드 창고 시뮬레이터 (로봇 이동/충돌, 피킹·WS 처리 시간) + 휴리스틱 배정 정책 BL1~BL6
+셀 그리드 창고 시뮬레이터 (다중 SKU 주문, 단일 SKU 토트, 로봇 이동/충돌, 피킹·WS 처리 시간) + 토트 단위 휴리스틱 배정 정책 BL1~BL6
 
 시뮬레이션 동작 방식과 TODO: [SIMULATION.md](SIMULATION.md)
 
 | 파일 | 내용 |
 |---|---|
 | `grid.py` | 셀 레이아웃, 유향 셀 그래프, 거리 테이블, SKU 배치 |
-| `environment.py` | 로봇 상태, NNH 경로, 복귀 WS 선택 |
+| `environment.py` | 로봇 상태, 트립 경로 (피킹 셀 NNH → 하역 도킹 셀 NNH) |
 | `reservation.py` | 시공간 예약표와 구간 경로 탐색 (SIPP) |
-| `simulator.py` | 주문 관리, 틱 이동 엔진 (reserve / reactive) |
+| `simulator.py` | 주문/토트 관리, 주문-WS 배정, 틱 이동 엔진 (reserve / reactive) |
 | `baselines.py` | 배정 정책 BL1~BL6 |
-| `scenario.py` | 주문 도착/SKU 수요/저장/처리 시간 분포 |
+| `scenario.py` | 주문 도착/주문 크기/SKU 수요/저장/처리 시간 분포 |
 | `metrics.py` | 에피소드 지표, CSV 저장, 비교표 |
 | `run.py` | 정책 평가 실행 |
 
 ## 평가
 
 ```bash
-python run.py                                   # BL1~BL6, λ=800/hr, M=14, K=3, 평가 시드 20개
-python run.py --policies BL4 BL6 --lam 900 --robots 18 --n-eval 5 --motion reactive
+python run.py                                   # BL1~BL6, λ=320 주문/hr, M=14, K=3, 평가 시드 20개
+python run.py --policies BL4 BL6 --lam 280 --robots 18 --n-eval 5 --motion reactive
 ```
 
 ## 시뮬레이션 뷰어

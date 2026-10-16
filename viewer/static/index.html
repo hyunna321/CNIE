@@ -105,7 +105,7 @@ canvas.chart { width: 100%; height: 86px; display: block; border: 1px solid var(
     <h2>배정 정책</h2>
     <label>정책<select id="policy"></select></label>
     <h2>시스템</h2>
-    <label>주문 도착률 λ<small>orders/hr</small><input id="lam_hr" type="number" value="800" min="1"></label>
+    <label>주문 도착률 λ<small>orders/hr</small><input id="lam_hr" type="number" value="320" min="1"></label>
     <label>로봇 수 M<input id="num_robots" type="number" value="14" min="1" max="40"></label>
     <label>워크스테이션 수 K<input id="num_workstations" type="number" value="3" min="1" max="6"></label>
     <label>로봇 용량<small>토트</small><input id="robot_capacity" type="number" value="5" min="1" max="10"></label>
@@ -116,6 +116,8 @@ canvas.chart { width: 100%; height: 86px; display: block; border: 1px solid var(
     <h2>주문 도착 과정</h2>
     <label>분포<select id="arrival"></select></label>
     <div id="arrivalParams"></div>
+    <h2>주문 크기 (주문당 SKU = 토트 수)</h2>
+    <div id="lineParams"></div>
     <h2>SKU 수요</h2>
     <label>분포<select id="sku_dist"></select></label>
     <div id="skuParams"></div>
@@ -210,6 +212,8 @@ function field(id, label, hint, kind, value) {
 function renderParams(scen) {
   const d = Object.assign({}, META.scenario_defaults, scen || {});
   $("arrivalParams").innerHTML = (ARRIVAL_PARAMS[$("arrival").value] || []).map(p => field(p[0], p[1], p[2], p[3], d[p[0]])).join("");
+  $("lineParams").innerHTML = field("lines_mean", "평균 SKU 수", "1 + 기하분포, 1이면 단일 SKU", "", d.lines_mean) +
+    field("lines_max", "최대 SKU 수", "기하분포 절단", "", d.lines_max);
   $("skuParams").innerHTML = (SKU_PARAMS[$("sku_dist").value] || []).map(p => field(p[0], p[1], p[2], p[3], d[p[0]])).join("");
   const tsel = (id, v) => `<select id="sc_${id}">${META.enums[id].map(x => `<option value="${x}" ${x === v ? "selected" : ""}>${TIME_NAMES[x]}</option>`).join("")}</select>`;
   $("timeParams").innerHTML =
@@ -297,6 +301,7 @@ function renderKpis() {
   const items = [["평균 흐름시간", f(s.avg_flow_time) + " s"], ["평균 대기시간", f(s.avg_wait_time) + " s"],
     ["완료 / 도착", `${s.n_completed} / ${s.n_arrived}`], ["처리량", f(s.throughput_per_h, 0) + " /h"],
     ["총 이동거리", f(s.total_distance / 1000, 1) + " km"], ["주문당 거리", f(s.dist_per_order) + " m"],
+    ["주문당 토트", f(s.n_totes / Math.max(1, s.n_arrived), 2)], ["처리 토트", f(s.n_totes_done, 0)],
     ["막힘 대기 합계", f(s.blocked_time, 0) + " robot·s"], ["트립당 토트", f(s.avg_totes_per_trip, 2)],
     ["경로계획 실패", f(s.n_plan_fail, 0)], ["실행 시간", f(RUN.wall_s, 1) + " s"]];
   $("kpis").innerHTML = items.map(([k, v]) => `<div class="kpi"><b>${v}</b><span>${k}</span></div>`).join("");
@@ -305,7 +310,7 @@ function renderLegend() {
   const ring = c => `<i style="background:var(--panel);border:2.5px solid ${css(c)};box-sizing:border-box"></i>`;
   $("legend").innerHTML = `<span>색 = 로봇 번호</span><span><i style="background:var(--muted);opacity:.4"></i>주차·대기 중(옅게)</span>` +
     `<span>${ring("--st-waiting")}막혀서 대기</span><span>${ring("--st-picking")}피킹</span><span>${ring("--st-ws")}WS 처리</span>` +
-    `<span>× 배정된 피킹 위치(로봇 색)</span><span>◆ 미배정 주문</span>`;
+    `<span>× 배정된 피킹 위치(로봇 색)</span><span>◆ 미배정 토트</span>`;
 }
 function buildRobotList() {
   $("robotList").innerHTML = Array.from({ length: TR.M }, (_, i) =>
@@ -391,7 +396,7 @@ function draw() {
   if (!TR) return;
   const cv = $("map"), g = cv.getContext("2d"), cs = view.cs, t = tick * TR.dt;
   g.clearRect(0, 0, cv.width, cv.height); g.drawImage(bg, 0, 0); if (heatCanvas) g.drawImage(heatCanvas, 0, 0);
-  // 미배정 주문
+  // 미배정 토트
   if ($("showOrders").checked) {
     g.fillStyle = css("--st-picking");
     for (const o of orderLoc) { if (o[1] > t) break; if (o[2] !== null && o[2] <= t) continue; if (o[3] !== null && o[3] <= t) continue;
@@ -470,7 +475,7 @@ function renderRobot() {
   const visits = rv ? rv[2].filter(c => c !== rv[3]).map((c, j) => `${j + 1}:(${LAY.cells[c]})`).join(" → ") : "";
   const ws = rv ? LAY.docks.findIndex(d => LAY.cells[rv[3]][0] === d[0] && LAY.cells[rv[3]][1] === d[1]) + 1 : "-";
   const myOrders = orderLoc.filter(o => o[6] === selRobot && o[2] !== null && o[2] <= tick * TR.dt && (o[3] === null || o[3] > tick * TR.dt));
-  $("robotInfo").textContent = `R${selRobot}  위치 (${x}, ${y})  상태 ${ST_LABELS[st]}\n적재/배정 주문 ${myOrders.length}건 (토트 ${load})\n` +
+  $("robotInfo").textContent = `R${selRobot}  위치 (${x}, ${y})  상태 ${ST_LABELS[st]}\n배정 토트 ${myOrders.length}개 (적재 ${load})\n` +
     `남은 방문: ${visits || "없음"}${rv && rv[2].length ? ` → WS${ws}` : ""}\n복귀 워크스테이션 WS${ws}\n예약 경로 남은 길이: ${plan.length} 틱`;
 }
 // 재생

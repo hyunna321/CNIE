@@ -29,6 +29,8 @@ NUM_WORKSTATIONS = 3      # 창고 하단(y=0)에 균등 배치
 
 # 그리드 이동
 CELL_SIZE             = 1.0     # m, 셀 한 변 = 로봇 크기
+ORDER_LINES_MEAN      = 2.5     # 주문당 평균 SKU(토트) 수, 기하분포
+ORDER_LINES_MAX       = 10      # 주문당 최대 SKU 수 (기하분포 절단)
 PICK_TIME             = 5.2     # s/토트, 랙 앞에서 토트를 꺼내 싣는 시간
 WS_PROC_TIME          = 4.9     # s/토트, 워크스테이션에서 토트를 처리하는 시간
 WS_QUEUE_CELLS        = None    # 워크스테이션별 대기열 셀 수, None이면 ceil(M/K)
@@ -43,7 +45,7 @@ RESERVE_MAX_EXPAND    = 60000   # 구간 경로 탐색 1회의 최대 상태 확
 
 # 시뮬레이션
 SIM_TIME       = 10 * 3600     # s, 10시간 근무
-LAMBDA_DEFAULT = 800 / 3600    # orders/s
+LAMBDA_DEFAULT = 320 / 3600    # orders/s (평균 2.5토트 → 약 800토트/hr)
 
 # 배정 정책
 PARTIAL_K = 3      # BL2 Partial-Buffer 출발 기준 주문 수

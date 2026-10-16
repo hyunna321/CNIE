@@ -12,19 +12,21 @@ from constant import SIM_TIME
 
 @dataclass
 class EpisodeResult:
-    """에피소드 1회의 결과 지표"""
+    """에피소드 1회의 결과 지표 (주문 단위: n_completed, n_arrived, 흐름/대기 시간, 주문당 거리)"""
     label:                  str
     episode:                int
     lam:                    float
     num_robots:             int
     n_completed:            int
     n_arrived:              int
-    avg_flow_time:          float
-    avg_wait_time:          float
+    avg_flow_time:          float         # s, 주문 도착 -> 마지막 토트 WS 처리 완료
+    avg_wait_time:          float         # s, 주문 도착 -> 첫 토트 로봇 배정
     dist_per_order:         float
+    n_totes:                int   = 0     # 도착 주문의 토트 수
+    n_totes_done:           int   = 0     # WS 처리를 마친 토트 수
     total_distance:         float = 0.0   # m, 총 이동거리
-    avg_totes_per_trip:     float = 0.0   # 트립당 평균 토트(주문) 수
-    mid_trip_rate:          float = 0.0
+    avg_totes_per_trip:     float = 0.0   # 트립당 평균 처리 토트 수
+    mid_trip_rate:          float = 0.0   # mid-trip 삽입 수 / 처리 토트 수
     extra_travel_m:         float = 0.0
     saving_per_insertion:   float = 0.0   # m, 삽입 1건당 절감 이동거리
     blocked_time:           float = 0.0   # robot·s, 다른 로봇에 막혀 기다린 시간
