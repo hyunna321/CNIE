@@ -35,6 +35,10 @@ class EpisodeResult:
     n_plan_fail:            int   = 0     # 경로계획 실패 횟수 (reserve 모드)
     plan_time_s:            float = 0.0   # 경로계획에 쓴 실행 시간 (reserve 모드)
     sim_time:               float = SIM_TIME   # s, 시뮬레이션 시간
+    reward:                 float = 0.0   # RL: 완료 주문 1건당 누적 보상 (shaping 제외)
+    epsilon:                float = 0.0   # RL: 에피소드 종료 시 ε
+    n_wait_action:          int   = 0     # RL: wait를 고른 횟수
+    n_forced_wait:          int   = 0     # RL: 그중 후보가 없어 강제로 대기한 횟수
 
     @property
     def completion_rate(self) -> float:
@@ -105,6 +109,45 @@ class MetricsStore:
         if last_n is not None:
             rs = rs[-last_n:]
         return rs
+
+
+@dataclass
+class TrainingPoint:
+    """학습 곡선의 에피소드 1개 지점"""
+    label:         str
+    episode:       int
+    reward:        float
+    loss:          float
+    epsilon:       float
+    n_completed:   int
+    avg_flow_time: float
+
+
+class TrainingCurveStore:
+    """학습 곡선 지점(TrainingPoint) 수집 및 CSV 저장"""
+
+    def __init__(self):
+        self.records: List[TrainingPoint] = []
+
+    def add(self, p: TrainingPoint):
+        """지점 1개 추가"""
+        self.records.append(p)
+
+    def save_csv(self, path: str):
+        """전체 지점 CSV 저장
+
+        입력:
+            path: 저장 경로 (상위 디렉터리는 자동 생성)
+        """
+        if not self.records:
+            return
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        fields = list(vars(self.records[0]).keys())
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fields)
+            w.writeheader()
+            for r in self.records:
+                w.writerow(vars(r))
 
 
 # 지표 이름 -> (값이 클수록 좋은지, 표시 이름)

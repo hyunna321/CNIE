@@ -428,12 +428,26 @@ class SimulatorBase:
             self.eq.push(Event(nxt, EVENT_ORDER_ARRIVAL, {"count": n}))
 
     def _advance_clock(self, t: float):
-        """시각을 t로 옮김
+        """시각을 t로 옮기며 [now, t] 구간의 상태를 _on_interval()에 전달
+
+        구간 안에서는 시스템 내 주문 수와 운행 중 로봇 수가 불변 (틱과 주문 도착 사이에서만 바뀜)
 
         입력:
             t: 새 시각 (s)
         """
+        if t > self.now:
+            n_busy = sum(1 for r in self.robots if not r.is_idle)
+            self._on_interval(self.now, t, self._n_in_system, n_busy)
         self.now = t
+
+    def _on_interval(self, t0: float, t1: float, n_in_system: int, n_busy: int):
+        """사건 사이 구간 [t0, t1] 훅 (RL 비용 적분용). 기본 구현은 no-op
+
+        입력:
+            t0, t1: 구간 시작/끝 시각 (s)
+            n_in_system: 구간 동안 시스템 내 주문 수 (도착 − 완료)
+            n_busy: 구간 동안 운행 중인 로봇 수
+        """
 
     def _choose_ws(self, order: Order) -> int:
         """주문을 처리할 워크스테이션: 처리 전 토트가 가장 적은 WS (동률이면 번호가 작은 WS)"""

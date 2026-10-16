@@ -126,6 +126,10 @@ class GridWarehouseLayout:
         rt = self._D[np.ix_(docks, picks)] + self._D[np.ix_(picks, docks)].T
         self.solo_rt_m = float(rt.min(axis=0).mean()) * CELL_SIZE
 
+        # RL 특징 정규화 기준: 좌표(워크스테이션 기준 상대좌표), 이동거리(삽입 detour 등)
+        self.coord_norm = max(self.n_cols, self.n_rows) * CELL_SIZE
+        self.dist_norm  = (self.n_cols + self.n_rows) * CELL_SIZE
+
     # SKU 배치
 
     def _assign_skus(self) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
