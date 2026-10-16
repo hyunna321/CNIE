@@ -1,245 +1,23 @@
-import random
+"""로봇 상태와 트립 경로 구성 (NNH 방문 순서, 복귀 워크스테이션 선택)
+
+좌표는 grid.GridWarehouseLayout의 셀 (col, row), 거리는 layout.aisle_distance (유향 셀 그래프 최단거리, m)
+"""
+from __future__ import annotations
+
 from collections import deque
-from typing import List, Tuple, Dict, Callable, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
 
-import numpy as np
+if TYPE_CHECKING:
+    from grid import GridWarehouseLayout
 
-from constant import (
-    BN, AN, SN, Wa, Wc, Wt, Dt, STORAGE_LOCS, NUM_SKUS,
-    NUM_ROBOTS, ROBOT_CAPACITY, NUM_WORKSTATIONS, DEFAULT_SEED,
-    ROBOT_SPEED, STATE_MAX_TIME, REWARD_D_MAX, SOLO_RT_M,
-)
-
-
-class WarehouseLayout:
-    """블록/통로/선반으로 구성된 창고 레이아웃과 통로 기반 거리 계산
-
-    - 워크스테이션 K개: 창고 하단(y=0)에 폭 방향으로 균등 배치
-    - 각 저장 위치에 SKU 무작위 할당
-    """
-
-    def __init__(self, seed: int = DEFAULT_SEED,
-                 num_robots: int = NUM_ROBOTS,
-                 robot_capacity: int = ROBOT_CAPACITY,
-                 num_workstations: int = NUM_WORKSTATIONS,
-                 scenario=None):
-        """
-        입력:
-            seed: SKU 배치용 난수 시드
-            num_robots: 로봇 수
-            robot_capacity: 로봇 1대가 한 트립에 담을 수 있는 토트 수
-            num_workstations: 워크스테이션 수 K
-            scenario: scenario.Scenario (None이면 기본값: 포아송/균등/무작위 저장/고정 시간)
-        """
-        from scenario import Scenario
-        self.scenario         = scenario if scenario is not None else Scenario()
-        self.num_robots       = num_robots
-        self.robot_capacity   = robot_capacity
-        self.num_workstations = num_workstations
-        self.rng              = random.Random(seed)
-
-        self.aisle_block_w  = Wa + 2 * Dt
-        self.block_h        = Wc + SN * Wt
-        self.total_width    = AN * self.aisle_block_w
-        self.total_height   = BN * self.block_h + (BN - 1) * Wc
-
-        # coord_norm: 좌표(로봇/주문의 워크스테이션 기준 상대좌표) 정규화 기준
-        # dist_norm : 이동거리(삽입 detour 등) 정규화 기준
-        self.coord_norm = max(self.total_width, self.total_height)
-        self.dist_norm  = self.total_width + self.total_height
-        # reward_d_max: 삽입 detour 보상 정규화 기준, solo_rt_m: 주문 1건 단독 왕복 거리 추정치
-        self.reward_d_max = REWARD_D_MAX
-        self.solo_rt_m    = SOLO_RT_M
-
-        self.workstations = self._build_workstations()
-        self.workstation  = self.workstations[0]
-
-        # 교차통로 밴드 (y_lo, y_hi): 최하단 밴드 + 블록 사이 밴드
-        self.cross_bands = [(0.0, Wc)]
-        for b in range(BN - 1):
-            top_b            = b * (self.block_h + Wc) + self.block_h
-            shelf_start_next = (b + 1) * (self.block_h + Wc) + Wc
-            self.cross_bands.append((top_b, shelf_start_next))
-
-        self.storage_coords, self.access_coords = self._build_storage_coords()
-        self.sku_ids        = list(range(NUM_SKUS))
-        self.loc_to_sku, self.sku_to_locs = self._assign_skus()
-        if self.scenario.storage == "class_based" and not getattr(self, "is_grid", False):
-            self.apply_class_storage()
-
-    def _build_workstations(self) -> List[Tuple[float, float]]:
-        """워크스테이션 좌표 생성
-
-        출력:
-            창고 하단(y=0)에 폭 방향으로 균등 배치된 K개 좌표 리스트
-        """
-        xs = [(i + 0.5) / self.num_workstations * self.total_width
-              for i in range(self.num_workstations)]
-        return [(x, 0.0) for x in xs]
-
-    def _build_storage_coords(self):
-        """모든 저장 위치의 좌표와 통로 접근 좌표 생성
-
-        출력:
-            (coords, access)
-            coords: 랙 위 토트 좌표 리스트
-            access: 각 토트에 접근하는 통로 중앙선 위 좌표 리스트 (coords와 같은 순서)
-        """
-        coords, access = [], []
-        for b in range(BN):
-            block_y0 = b * (self.block_h + Wc)
-            for a in range(AN):
-                cx = a * self.aisle_block_w + Dt + Wa / 2
-                x_left  = cx - Wa / 2 - Dt / 2
-                x_right = cx + Wa / 2 + Dt / 2
-                for side_x in (x_left, x_right):
-                    for row in range(SN):
-                        y = block_y0 + Wc + (row + 0.5) * Wt
-                        coords.append((side_x, y))
-                        access.append((cx, y))
-
-        assert len(coords) == STORAGE_LOCS, (
-            f"Coordinate count mismatch: expected {STORAGE_LOCS}, got {len(coords)}"
-        )
-        return coords, access
-
-    def _assign_skus(self) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
-        """저장 위치마다 SKU 무작위 할당
-
-        위치가 하나도 할당되지 않은 SKU는 임의 위치 하나를 추가 매핑
-
-        출력:
-            (loc_to_sku, sku_to_locs)
-            loc_to_sku: 위치 인덱스 -> SKU
-            sku_to_locs: SKU -> 위치 인덱스 리스트
-        """
-        indices = list(range(len(self.storage_coords)))
-        self.rng.shuffle(indices)
-        loc_to_sku: Dict[int, int]       = {}
-        sku_to_locs: Dict[int, List[int]] = {s: [] for s in self.sku_ids}
-
-        for idx in indices:
-            sku = self.rng.choice(self.sku_ids)
-            loc_to_sku[idx] = sku
-            sku_to_locs[sku].append(idx)
-
-        for sku in self.sku_ids:
-            if not sku_to_locs[sku]:
-                fallback = self.rng.choice(indices)
-                sku_to_locs[sku].append(fallback)
-
-        return loc_to_sku, sku_to_locs
-
-    def apply_class_storage(self):
-        """클래스 기반 저장: 인기 SKU(id가 작은 SKU)를 워크스테이션에서 가까운 위치부터 배정
-
-        - 위치를 가장 가까운 워크스테이션까지 거리(워크스테이션 -> 위치) 순으로 정렬
-        - SKU마다 같은 수의 위치를 순위대로 분배
-        (Hausman et al., 1976의 class-based storage를 SKU 순위 단위로 세분한 형태)
-        """
-        n_loc = len(self.access_coords)
-        dist  = [min(self.aisle_distance(w, self.access_coords[i]) for w in self.workstations)
-                 for i in range(n_loc)]
-        order = sorted(range(n_loc), key=lambda i: (dist[i], i))
-        n_sku = len(self.sku_ids)
-        self.loc_to_sku  = {}
-        self.sku_to_locs = {s: [] for s in self.sku_ids}
-        for rank, i in enumerate(order):
-            sku = self.sku_ids[min(n_sku - 1, rank * n_sku // n_loc)]
-            self.loc_to_sku[i] = sku
-            self.sku_to_locs[sku].append(i)
-
-    def manhattan(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
-        """두 점의 맨해튼(L1) 거리 (랙 통과를 허용하므로 이동 비용 계산에는 미사용)
-
-        입력:
-            p1, p2: (x, y) 좌표
-        출력:
-            |Δx| + |Δy|
-        """
-        return abs(p1[0] - p2[0]) + abs(p1[1] - p2[1])
-
-    @staticmethod
-    def _band_vert(ya: float, yb: float, lo: float, hi: float) -> float:
-        """교차통로 밴드 [lo, hi]를 경유해 ya에서 yb로 갈 때의 세로 이동거리
-
-        입력:
-            ya, yb: 출발/도착 y 좌표
-            lo, hi: 밴드의 y 범위
-        출력:
-            세로 방향 이동거리
-        """
-        lo_ab, hi_ab = (ya, yb) if ya <= yb else (yb, ya)
-        if hi < lo_ab:
-            yc = hi
-        elif lo > hi_ab:
-            yc = lo
-        else:
-            return abs(ya - yb)
-        return abs(ya - yc) + abs(yb - yc)
-
-    def aisle_distance(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
-        """통로 그래프 위 최단 이동거리
-
-        - 같은 세로 통로(x 동일): |Δy|
-        - 다른 통로: 가장 유리한 교차통로 밴드를 경유하는 거리(세로 우회 + |Δx|)
-
-        입력:
-            p1, p2: (x, y) 좌표
-        출력:
-            이동거리 (m)
-        """
-        x1, y1 = p1
-        x2, y2 = p2
-        if abs(x1 - x2) < 1e-9:
-            return abs(y1 - y2)
-        dx   = abs(x1 - x2)
-        best = float("inf")
-        for lo, hi in self.cross_bands:
-            best = min(best, self._band_vert(y1, y2, lo, hi) + dx)
-        return best
-
-    def sample_order_sku(self, rng: random.Random) -> int:
-        """주문 SKU 하나를 균등 확률로 추출
-
-        입력:
-            rng: 난수 생성기
-        출력:
-            SKU id
-        """
-        return rng.choice(self.sku_ids)
-
-    def find_tote_location(
-        self, sku: int, rng: random.Random
-    ) -> Tuple[int, Tuple[float, float]]:
-        """SKU가 보관된 위치 중 하나를 무작위 선택
-
-        입력:
-            sku: SKU id
-            rng: 난수 생성기
-        출력:
-            (위치 인덱스, 통로 접근 좌표)
-        """
-        locs = self.sku_to_locs[sku]
-        idx  = rng.choice(locs)
-        return idx, self.access_coords[idx]
-
-    @property
-    def num_locations(self) -> int:
-        """전체 저장 위치 수"""
-        return len(self.storage_coords)
-
-    @property
-    def num_skus(self) -> int:
-        """전체 SKU 수"""
-        return len(self.sku_ids)
+Cell = Tuple[int, int]
 
 
 def nearest_neighbor_route(
-    start:        Tuple[float, float],
-    destinations: List[Tuple[float, float]],
-    dist_func:    Callable[[Tuple[float, float], Tuple[float, float]], float],
-) -> List[Tuple[float, float]]:
+    start:        Cell,
+    destinations: List[Cell],
+    dist_func:    Callable[[Cell, Cell], float],
+) -> List[Cell]:
     """최근접 이웃(NNH) 방식의 방문 순서 결정
 
     입력:
@@ -260,10 +38,10 @@ def nearest_neighbor_route(
 
 
 def route_total_distance(
-    start:     Tuple[float, float],
-    route:     List[Tuple[float, float]],
-    end:       Tuple[float, float],
-    dist_func: Callable[[Tuple[float, float], Tuple[float, float]], float],
+    start:     Cell,
+    route:     List[Cell],
+    end:       Cell,
+    dist_func: Callable[[Cell, Cell], float],
 ) -> float:
     """start -> route -> end 경로의 총 이동거리
 
@@ -286,9 +64,9 @@ def route_total_distance(
 
 
 def nearest_workstation(
-    loc: Tuple[float, float],
-    workstations: List[Tuple[float, float]],
-    dist_func: Callable[[Tuple[float, float], Tuple[float, float]], float],
+    loc: Cell,
+    workstations: List[Cell],
+    dist_func: Callable[[Cell, Cell], float],
 ) -> int:
     """주어진 위치에서 가장 가까운 워크스테이션 탐색
 
@@ -303,11 +81,11 @@ def nearest_workstation(
 
 
 def best_workstation_route(
-    start: Tuple[float, float],
-    destinations: List[Tuple[float, float]],
-    workstations: List[Tuple[float, float]],
-    dist_func: Callable[[Tuple[float, float], Tuple[float, float]], float],
-) -> Tuple[int, List[Tuple[float, float]], float]:
+    start: Cell,
+    destinations: List[Cell],
+    workstations: List[Cell],
+    dist_func: Callable[[Cell, Cell], float],
+) -> Tuple[int, List[Cell], float]:
     """NNH 경로 생성 후 총 이동거리가 최소가 되는 복귀 워크스테이션 선택
 
     입력:
@@ -334,14 +112,14 @@ class Robot:
     (트립 시작 또는 주문 삽입 때마다 총 이동거리가 최소가 되도록 재결정)
     """
 
-    def __init__(self, robot_id: int, workstation: Tuple[float, float],
-                 layout: WarehouseLayout, capacity: int,
+    def __init__(self, robot_id: int, workstation: Cell,
+                 layout: GridWarehouseLayout, capacity: int,
                  workstation_id: int = 0):
         """
         입력:
             robot_id: 로봇 id
             workstation: 초기 워크스테이션 좌표
-            layout: WarehouseLayout
+            layout: GridWarehouseLayout
             capacity: 적재 가능한 토트 수
             workstation_id: 초기 워크스테이션 인덱스
         """
@@ -359,55 +137,25 @@ class Robot:
         self.idle_slots        = self.capacity
         self.is_idle           = True
         self.current_dest      = None
-        self.progress          = 0.0
-        self.total_travel_time = 0.0
-        self._travel_start     = None
-        # 그리드 이동 모드 전용: 피킹/워크스테이션 처리 잔여 시간, 우회 경로, 연속 대기 틱
+        # 피킹/워크스테이션 처리 잔여 시간, 우회 경로(reactive), 연속 대기 틱, 주차 칸
         self.timer             = 0.0
         self.timer_kind        = None
         self.detour            = []
         self.wait_ticks        = 0
         self.park_spot         = None
-        # 그리드 예약 모드 전용: 경로가 바뀔 때마다 route_version이 오르고, 계획은 plan_version 기준
+        # reserve 모드: 경로가 바뀔 때마다 route_version이 오르고, 계획은 plan_version 기준
         self.route_version     = 0
         self.plan_version      = 0
         self.plan              = deque()     # (틱, 셀) 순서의 예약 경로
         self.replan_pending    = False
         self.pending_insert    = []          # 계획 실패로 아직 경로에 넣지 못한 삽입 주문 위치
 
-    def start_travel(self, now: float):
-        """이동 시작 시각 기록 (이미 이동 중이면 무시)
-
-        입력:
-            now: 현재 시각 (s)
-        """
-        if self._travel_start is None:
-            self._travel_start = now
-
-    def end_travel(self, now: float):
-        """이동 종료 시 누적 이동시간 갱신
-
-        입력:
-            now: 현재 시각 (s)
-        """
-        if self._travel_start is not None:
-            self.total_travel_time += max(0.0, now - self._travel_start)
-            self._travel_start = None
-
-    def time_to_complete_current(self) -> float:
-        """현재 트립을 마치고 복귀할 때까지 남은 시간
-
-        출력:
-            남은 이동시간 (s)
-        """
-        return self.remaining_distance / ROBOT_SPEED
-
     @property
     def remaining_distance(self) -> float:
         """현재 목적지 -> 남은 경로 -> 복귀 워크스테이션까지 남은 이동거리 (m)"""
         d = 0.0
         if self.current_dest:
-            d += max(0.0, self._md(self.pos, self.current_dest) - self.progress)
+            d += self._md(self.pos, self.current_dest)
         if self.route:
             prev = self.current_dest if self.current_dest else self.pos
             for nxt in self.route:
@@ -424,27 +172,15 @@ class Robot:
         출력:
             남은 경유지가 있어 다음 목적지가 설정되면 True, 없으면 False
         """
-        self.pos      = self.current_dest
-        self.progress = 0.0
+        self.pos = self.current_dest
         if self.route:
             self.current_dest = self.route.pop(0)
             return True
         self.current_dest = None
         return False
 
-    def redock(self, ws_id: int, layout: WarehouseLayout):
-        """idle 로봇의 복귀 워크스테이션만 변경 (현재 위치 pos는 유지)
-
-        입력:
-            ws_id: 새 워크스테이션 인덱스
-            layout: WarehouseLayout
-        """
-        assert self.is_idle, "redock()은 idle 로봇에서만 호출할 수 있습니다."
-        self.workstation_id = ws_id
-        self.workstation     = layout.workstations[ws_id]
-
-    def assign_trip(self, destinations: List[Tuple[float, float]],
-                    layout: WarehouseLayout):
+    def assign_trip(self, destinations: List[Cell],
+                    layout: GridWarehouseLayout):
         """현재 위치에서 출발하는 새 트립 배정 및 이동 시작
 
         - 방문 순서: NNH
@@ -452,7 +188,7 @@ class Robot:
 
         입력:
             destinations: 방문할 좌표 리스트
-            layout: WarehouseLayout
+            layout: GridWarehouseLayout
         """
         best_ws_id, route, _ = best_workstation_route(
             self.pos, destinations, layout.workstations, layout.aisle_distance)
@@ -464,15 +200,15 @@ class Robot:
         self.route_version += 1
         self._start_move()
 
-    def insert_and_reorder(self, loc: Tuple[float, float],
-                            layout: WarehouseLayout):
+    def insert_and_reorder(self, loc: Cell,
+                            layout: GridWarehouseLayout):
         """이동 중인 트립에 주문 삽입 후 남은 경로와 복귀 워크스테이션 재계산
 
         현재 목적지(current_dest)는 유지하고 그 이후 경로만 재구성
 
         입력:
             loc: 삽입할 주문 위치
-            layout: WarehouseLayout
+            layout: GridWarehouseLayout
         """
         pending = list(self.route) + [loc]
         start   = self.current_dest if self.current_dest else self.pos
@@ -484,9 +220,9 @@ class Robot:
         self.idle_slots  = max(0, self.idle_slots - 1)
         self.route_version += 1
 
-    def delta_distance_insert(self, loc: Tuple[float, float],
-                               layout: WarehouseLayout,
-                               target_ws_coords: Optional[Tuple[float, float]] = None,
+    def delta_distance_insert(self, loc: Cell,
+                               layout: GridWarehouseLayout,
+                               target_ws_coords: Optional[Cell] = None,
                                dynamic_ws: bool = False,
                                ) -> float:
         """주문을 이 로봇에 추가했을 때 늘어나는 이동거리
@@ -499,7 +235,7 @@ class Robot:
 
         입력:
             loc: 추가할 주문 위치
-            layout: WarehouseLayout
+            layout: GridWarehouseLayout
             target_ws_coords: 고정할 복귀 좌표
             dynamic_ws: 복귀 워크스테이션 재탐색 여부
         출력:
@@ -526,64 +262,12 @@ class Robot:
 
         return after - before
 
-    def insert_preview(self, loc: Tuple[float, float], layout: WarehouseLayout,
-                       idle_ws_id: int) -> Tuple[float, int]:
-        """주문을 넣었을 때의 (추가 이동거리, 복귀 워크스테이션 인덱스)
-
-        idle이면 idle_ws_id로 복귀 가정, 이동 중이면 최적 워크스테이션 재탐색
-        (delta_distance_insert와 같은 기준)
-
-        입력:
-            loc: 추가할 주문 위치
-            layout: WarehouseLayout
-            idle_ws_id: idle 로봇의 가정 복귀 워크스테이션 인덱스
-        출력:
-            (추가 이동거리 (m), 복귀 워크스테이션 인덱스)
-        """
-        if self.is_idle:
-            delta = self.delta_distance_insert(
-                loc, layout, target_ws_coords=layout.workstations[idle_ws_id])
-            return delta, idle_ws_id
-        pending = list(self.route) + [loc]
-        start   = self.current_dest if self.current_dest else self.pos
-        ws_id, _, after = best_workstation_route(
-            start, pending, layout.workstations, layout.aisle_distance)
-        return after - self._remaining_route_dist(layout, self.workstation), ws_id
-
-    def state_vector(self, max_cap: int, max_time: float = STATE_MAX_TIME) -> np.ndarray:
-        """로봇 상태를 현재 복귀 워크스테이션 기준 상대좌표로 인코딩
-
-        입력:
-            max_cap: 로봇 용량 (슬롯/경로 정규화 및 패딩 길이)
-            max_time: 잔여 이동시간 정규화 기준 (s)
-        출력:
-            길이 5 + max_cap*2 벡터
-            [상대 x, 상대 y, 빈 슬롯 비율, idle 여부, 잔여시간, 경유지 상대좌표...]
-        """
-        wx, wy     = self.workstation
-        norm       = self.layout.coord_norm
-        rem_t_norm = min(self.time_to_complete_current() / max_time, 1.0)
-        vec = [
-            (self.pos[0] - wx) / norm,
-            (self.pos[1] - wy) / norm,
-            float(self.idle_slots) / max_cap,
-            float(self.is_idle),
-            rem_t_norm,
-        ]
-        route_flat = []
-        for p in self.route[:max_cap]:
-            route_flat.extend([(p[0] - wx) / norm, (p[1] - wy) / norm])
-        while len(route_flat) < max_cap * 2:
-            route_flat.extend([0.0, 0.0])
-        vec.extend(route_flat)
-        return np.array(vec, dtype=np.float32)
-
-    def _remaining_route_dist(self, layout: WarehouseLayout,
-                               end: Optional[Tuple[float, float]] = None) -> float:
+    def _remaining_route_dist(self, layout: GridWarehouseLayout,
+                               end: Optional[Cell] = None) -> float:
         """현재 목적지(없으면 현재 위치)부터 남은 경로를 거쳐 end까지의 거리
 
         입력:
-            layout: WarehouseLayout
+            layout: GridWarehouseLayout
             end: 도착 좌표 (None이면 self.workstation)
         출력:
             이동거리 (m)

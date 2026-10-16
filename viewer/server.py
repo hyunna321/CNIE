@@ -81,8 +81,6 @@ class Handler(BaseHTTPRequestHandler):
                     while len(RUNS) > MAX_RUNS:
                         RUNS.popitem(last=False)
                 self._json(res)
-            elif u.path == "/api/checkpoint":
-                self._json(runner.read_checkpoint_meta(body["path"]))
             else:
                 self._json({"error": "not found"}, 404)
         except Exception as e:

@@ -1,6 +1,6 @@
 """그리드(셀) 기반 창고 레이아웃: 단방향 통로 그래프, 워크스테이션 대기열/주차 셀, 거리 테이블
 
-연속 좌표 레이아웃(environment.WarehouseLayout)과 같은 상수로 셀 지도 생성
+constant.py의 블록/통로/선반 상수로 셀 지도 생성
 CELL_SIZE = 1 m 기준 열 구성: [랙][통로][통로][통로] × AN + [랙] (등을 맞댄 랙 2개가 1칸)
 행 구성(아래부터): 워크스테이션 구역, 하단 교차통로, (블록 랙 행, 교차통로) × BN
 맨 위에 교차통로 하나 추가 (단방향 통로가 막다른 길이 되지 않도록)
@@ -24,6 +24,7 @@ CELL_SIZE = 1 m 기준 열 구성: [랙][통로][통로][통로] × AN + [랙] (
 좌표는 정수 셀 (col, row) 튜플, 거리 = 셀 수 × CELL_SIZE (m)
 """
 import math
+import random
 from collections import deque
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -31,9 +32,8 @@ import numpy as np
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 
-from environment import WarehouseLayout
 from constant import (
-    BN, AN, SN, Wa, Wc, Wt, Dt, NUM_ROBOTS, ROBOT_CAPACITY, NUM_WORKSTATIONS,
+    BN, AN, SN, Wa, Wc, Wt, Dt, STORAGE_LOCS, NUM_SKUS, NUM_ROBOTS, ROBOT_CAPACITY, NUM_WORKSTATIONS,
     DEFAULT_SEED, ROBOT_SPEED, CELL_SIZE, WS_QUEUE_CELLS, WS_PARK_CELLS,
     GRID_TRAFFIC, GRID_MOTION,
 )
@@ -48,15 +48,13 @@ RACK, AISLE, CROSS, WS_ZONE = 0, 1, 2, 3
 _GRAPH_CACHE: Dict[tuple, dict] = {}
 
 
-class GridWarehouseLayout(WarehouseLayout):
-    """셀 기반 레이아웃 (WarehouseLayout과 같은 인터페이스)
+class GridWarehouseLayout:
+    """셀 기반 창고 레이아웃
 
-    - SKU 배치는 같은 시드의 연속 레이아웃과 동일
-    - 저장 위치의 접근 좌표(access_coords)와 워크스테이션 좌표만 셀 좌표로 변경
+    - 저장 위치 STORAGE_LOCS개마다 SKU 무작위 할당 (scenario.storage가 class_based면 재배치)
+    - access_coords[i]: 저장 위치 i의 토트를 집는 통로 셀, workstations[k]: 워크스테이션 k의 도킹 셀
     - aisle_distance()는 유향 그래프 최단거리라 d(a, b) != d(b, a) 가능
     """
-
-    is_grid = True
 
     def __init__(self, seed: int = DEFAULT_SEED,
                  num_robots: int = NUM_ROBOTS,
@@ -83,10 +81,15 @@ class GridWarehouseLayout(WarehouseLayout):
         """
         assert traffic in ("free", "lanes"), traffic
         assert motion in ("reserve", "reactive"), motion
-        super().__init__(seed=seed, num_robots=num_robots,
-                         robot_capacity=robot_capacity,
-                         num_workstations=num_workstations,
-                         scenario=scenario)
+        from scenario import Scenario
+        self.scenario         = scenario if scenario is not None else Scenario()
+        self.num_robots       = num_robots
+        self.robot_capacity   = robot_capacity
+        self.num_workstations = num_workstations
+        self.rng              = random.Random(seed)
+        self.sku_ids          = list(range(NUM_SKUS))
+        self.loc_to_sku, self.sku_to_locs = self._assign_skus()
+
         self.collisions = collisions or motion == "reserve"
         self.traffic    = traffic
         self.motion     = motion
@@ -96,10 +99,8 @@ class GridWarehouseLayout(WarehouseLayout):
         self._build_cell_map()
         self._build_ws_zone()
 
-        # 저장 위치 인덱스 순서는 연속 레이아웃의 _build_storage_coords와 동일
         self.access_coords = self._build_pick_cells()
         self.workstations  = list(self.docks)
-        self.workstation   = self.workstations[0]
 
         key = (num_workstations, self.queue_len, self.lot_w, self.n_lanes, traffic)
         if key not in _GRAPH_CACHE:
@@ -119,18 +120,60 @@ class GridWarehouseLayout(WarehouseLayout):
             sorted(spots, key=lambda c, d=self.docks[k]: (self.aisle_distance(d, c), c))
             for k, spots in enumerate(self.park_spots)]
 
-        self.coord_norm = max(self.n_cols, self.n_rows) * CELL_SIZE
-        self.dist_norm  = (self.n_cols + self.n_rows) * CELL_SIZE
-
-        # 연속 레이아웃의 REWARD_D_MAX(≈ 2 × 최대 구간), SOLO_RT_M(단독 왕복)에 해당하는 값
-        key_pts = [self.cell_index[c] for c in set(self.access_coords)] + \
-                  [self.cell_index[d] for d in self.docks]
-        sub = self._D[np.ix_(key_pts, key_pts)]
-        self.reward_d_max = 2.0 * float(sub.max()) * CELL_SIZE
+        # 주문 1건 단독 왕복 거리 평균 (가장 가까운 WS 기준, 삽입 절감량 지표용)
         picks = [self.cell_index[c] for c in self.access_coords]
         docks = [self.cell_index[d] for d in self.docks]
         rt = self._D[np.ix_(docks, picks)] + self._D[np.ix_(picks, docks)].T
         self.solo_rt_m = float(rt.min(axis=0).mean()) * CELL_SIZE
+
+    # SKU 배치
+
+    def _assign_skus(self) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
+        """저장 위치마다 SKU 무작위 할당. 위치가 하나도 없는 SKU는 임의 위치 하나를 추가 매핑
+
+        출력:
+            (loc_to_sku, sku_to_locs)
+        """
+        indices = list(range(STORAGE_LOCS))
+        self.rng.shuffle(indices)
+        loc_to_sku: Dict[int, int]        = {}
+        sku_to_locs: Dict[int, List[int]] = {s: [] for s in self.sku_ids}
+        for idx in indices:
+            sku = self.rng.choice(self.sku_ids)
+            loc_to_sku[idx] = sku
+            sku_to_locs[sku].append(idx)
+        for sku in self.sku_ids:
+            if not sku_to_locs[sku]:
+                sku_to_locs[sku].append(self.rng.choice(indices))
+        return loc_to_sku, sku_to_locs
+
+    def apply_class_storage(self):
+        """클래스 기반 저장: 인기 SKU(id가 작은 SKU)를 워크스테이션에서 가까운 위치부터 배정
+
+        - 위치를 가장 가까운 워크스테이션까지 거리(워크스테이션 -> 위치) 순으로 정렬
+        - SKU마다 같은 수의 위치를 순위대로 분배
+        (Hausman et al., 1976의 class-based storage를 SKU 순위 단위로 세분한 형태)
+        """
+        n_loc = len(self.access_coords)
+        dist  = [min(self.aisle_distance(w, self.access_coords[i]) for w in self.workstations)
+                 for i in range(n_loc)]
+        order = sorted(range(n_loc), key=lambda i: (dist[i], i))
+        n_sku = len(self.sku_ids)
+        self.loc_to_sku  = {}
+        self.sku_to_locs = {s: [] for s in self.sku_ids}
+        for rank, i in enumerate(order):
+            sku = self.sku_ids[min(n_sku - 1, rank * n_sku // n_loc)]
+            self.loc_to_sku[i] = sku
+            self.sku_to_locs[sku].append(i)
+
+    def find_tote_location(self, sku: int, rng: random.Random) -> Tuple[int, Cell]:
+        """SKU가 보관된 위치 중 하나를 무작위 선택
+
+        출력:
+            (위치 인덱스, 피킹 셀)
+        """
+        idx = rng.choice(self.sku_to_locs[sku])
+        return idx, self.access_coords[idx]
 
     # 셀 지도
 
@@ -142,7 +185,7 @@ class GridWarehouseLayout(WarehouseLayout):
         shelf_h = int(round(SN * Wt / CELL_SIZE))
         assert rack_w == 1, "현재 열 배치는 등을 맞댄 랙 2개가 1칸이라고 가정한다."
 
-        # 행 구간: (종류, 시작 행, 행 수). 블록 사이 교차통로는 연속 레이아웃처럼 2·Wc
+        # 행 구간: (종류, 시작 행, 행 수). 블록 사이 교차통로는 2·Wc
         bands, blocks = [], []
         row = self.ws_rows                         # 아래 ws_rows행은 워크스테이션 구역
         bands.append((row, wc)); row += wc
@@ -185,7 +228,7 @@ class GridWarehouseLayout(WarehouseLayout):
         self.module  = 1 + aisle_w
         self.n_cols  = AN * self.module + 1
 
-        # 도킹 셀은 연속 레이아웃처럼 폭 방향 균등 위치, 서쪽에 대기열, 동쪽에 주차장
+        # 도킹 셀은 폭 방향 균등 위치, 서쪽에 대기열, 동쪽에 주차장
         K, M   = self.num_workstations, self.num_robots
         per_ws = math.ceil(M / K)
         span   = self.n_cols // K
@@ -239,7 +282,7 @@ class GridWarehouseLayout(WarehouseLayout):
                 for x in (x_left, x_right):
                     for r in range(SN):
                         cells.append((x, r0 + int((r + 0.5) * Wt / CELL_SIZE)))
-        assert len(cells) == len(self.storage_coords)
+        assert len(cells) == STORAGE_LOCS
         return cells
 
     # 그래프
