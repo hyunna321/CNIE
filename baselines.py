@@ -1,15 +1,14 @@
-"""RL과 비교하는 휴리스틱 배정 정책 BL1~BL6.
+"""휴리스틱 배정 정책 BL1~BL6
 
 - 버퍼형 (mid-trip 삽입 없음): BL1 Full-Buffer, BL2 Partial-Buffer
-- 삽입형 (mid-trip 삽입 허용): BL3 Random, BL4 Nearest, BL5 Min-Insertion,
-  BL6 Marginal-Cost, Greedy-R (RL과 같은 즉시 보상을 greedy하게 최대화)
+- 삽입형 (mid-trip 삽입 허용): BL3 Random, BL4 Nearest, BL5 Min-Insertion, BL6 Marginal-Cost
 """
 import random
 from typing import List, Optional, Tuple
 
 from environment import Robot
-from simulator import SimulatorBase, Order, compute_reward
-from constant import PARTIAL_K, ROBOT_SPEED, SMDP_COST_DIST
+from simulator import SimulatorBase, Order
+from constant import PARTIAL_K, ROBOT_SPEED, COST_DIST
 
 
 class BufferSimulator(SimulatorBase):
@@ -90,7 +89,7 @@ class InsertionSimulator(SimulatorBase):
     """
 
     def _select_robot(self, order: Order, eligible: List[Robot],
-                      target_coords: Tuple[float, float]) -> Robot:
+                      target_coords: Tuple[int, int]) -> Robot:
         """배정할 로봇 선택 (하위 클래스에서 구현)
 
         입력:
@@ -145,8 +144,8 @@ class NearestRobotSimulator(InsertionSimulator):
 class MinInsertionSimulator(InsertionSimulator):
     """BL5 Min-Insertion: 삽입 detour가 최소인 로봇에 배정
 
-    detour 계산 기준은 RLSimulator와 동일 (idle 후보는 주문에서 가장 가까운
-    워크스테이션 복귀 가정, mid-trip 후보는 최적 복귀 워크스테이션 재탐색)
+    idle 후보는 주문에서 가장 가까운 워크스테이션 복귀 가정,
+    mid-trip 후보는 최적 복귀 워크스테이션 재탐색 (SimulatorBase._insertion_delta)
     """
 
     def _select_robot(self, order, eligible, target_coords):
@@ -163,11 +162,11 @@ class MarginalCostSimulator(InsertionSimulator):
       - 기존 탑재 주문 지연: n_onboard · Δd / v
       - 새 주문 flow time : 삽입 후 남은 경로 거리 / v
       - 이동거리 증가     : mid-trip이면 Δd, idle이면 새 트립 전체 거리
-    RL의 smdp 보상과 같은 목적함수를 한 결정 단위로 greedy하게 최소화
+    피킹/WS 처리 시간과 혼잡 대기는 반영하지 않음
     """
 
     def _marginal_cost(self, robot: Robot, order: Order,
-                       target_coords: Tuple[float, float]) -> float:
+                       target_coords: Tuple[int, int]) -> float:
         """로봇에 주문을 넣을 때의 한계 비용 (order·s 단위)
 
         입력:
@@ -187,44 +186,9 @@ class MarginalCostSimulator(InsertionSimulator):
             remaining_after = robot.remaining_distance + delta_d
             delay_onboard   = len(self._robot_orders[robot.id]) * delta_d / ROBOT_SPEED
             added_distance  = delta_d
-        return delay_onboard + remaining_after / ROBOT_SPEED + SMDP_COST_DIST * added_distance
+        return delay_onboard + remaining_after / ROBOT_SPEED + COST_DIST * added_distance
 
     def _select_robot(self, order, eligible, target_coords):
         """한계 비용이 가장 작은 후보"""
         return min(eligible,
                    key=lambda r: self._marginal_cost(r, order, target_coords))
-
-
-class GreedyRewardSimulator(InsertionSimulator):
-    """Greedy-R: RL(legacy)과 같은 즉시 보상 compute_reward를 최대화하는 로봇에 배정
-
-    - 후보 집합, detour 계산, 라우팅(NNH + 복귀 워크스테이션 재선택), 보상 인자는
-      RLSimulator(reward_mode="legacy")와 동일
-    - DDQN과의 차이는 n-step 가치 추정의 유무뿐이므로, 학습의 증분 가치를 분리하는 대조군
-    """
-
-    def __init__(self, *args, reward_cfg=None, **kwargs):
-        """
-        입력:
-            *args, **kwargs: SimulatorBase 인자
-            reward_cfg: compute_reward 가중치 덮어쓰기용 kwargs (RL과 동일하게 설정)
-        """
-        super().__init__(*args, **kwargs)
-        self.reward_cfg = reward_cfg or {}
-
-    def _select_robot(self, order, eligible, target_coords):
-        """즉시 보상이 가장 큰 후보. 동점이면 eligible 순서상 앞선 후보 (np.argmax와 같음)"""
-        n_wait = self.order_mgr.queue_size()
-
-        def reward(r):
-            delta_d = self._insertion_delta(r, order.loc, target_coords)
-            return compute_reward(
-                r, order.loc, self.layout, delta_d,
-                robots=eligible,
-                n_wait=n_wait,
-                num_robots=len(eligible),
-                robot_capacity=self.robot_capacity,
-                **self.reward_cfg,
-            )
-
-        return max(eligible, key=reward)

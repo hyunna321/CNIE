@@ -1,4 +1,4 @@
-"""이산 사건 창고 시뮬레이터: 주문/사건 관리, 공통 엔진, RL 배정 시뮬레이터"""
+"""그리드 창고 시뮬레이터: 주문/사건 관리, 셀 단위 틱 이동 엔진 (reactive / reserve)"""
 import heapq
 import math
 import random
@@ -7,19 +7,12 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional
 
-import numpy as np
-
-from environment import WarehouseLayout, Robot, nearest_workstation
+from environment import Robot, nearest_workstation
+from grid import GridWarehouseLayout
 from reservation import ReservationTable, plan_leg
-from agents import DQNAgent, WS_FEAT_DIM
 from metrics import EpisodeResult
 from constant import (
-    SIM_TIME, ROBOT_SPEED, NUM_ROBOTS, ROBOT_CAPACITY, DEFAULT_SEED,
-    REWARD_GAMMA_Q, REWARD_ALPHA_MID, REWARD_ALPHA_IDLE,
-    REWARD_BETA_DEPLETION, REWARD_MODE_DEFAULT, GAMMA,
-    SMDP_BETA, SMDP_COST_DIST, SMDP_REWARD_SCALE,
-    SMDP_WAIT_KAPPA, SMDP_WAIT_TREF, SMDP_IA_EMA, SMDP_IA_NORM, STATE_MAX_TIME,
-    CELL_SIZE,
+    SIM_TIME, ROBOT_SPEED, DEFAULT_SEED, CELL_SIZE,
     GRID_REPLAN_WAIT, GRID_DETOUR_MAX_EXTRA, GRID_DEADLOCK_TICKS,
 )
 
@@ -42,12 +35,10 @@ class Order:
     service_start_time: Optional[float] = None   # 로봇에 배정된 시각
     pick_s:             float = 0.0             # 랙에서 이 토트를 꺼내는 시간 (s)
     proc_s:             float = 0.0             # 워크스테이션에서 이 토트를 처리하는 시간 (s)
-    picked:             bool  = False           # 그리드 모드: 로봇이 이미 집었는지
+    picked:             bool  = False           # 로봇이 이미 집었는지
 
 
 EVENT_ORDER_ARRIVAL = "ORDER_ARRIVAL"
-EVENT_NODE_ARRIVAL  = "ROBOT_NODE_ARRIVAL"
-EVENT_TRIP_COMPLETE = "ROBOT_TRIP_COMPLETE"
 
 
 @dataclass(order=True)
@@ -94,7 +85,7 @@ class OrderManager:
     def __init__(self, layout, lam: float, seed: int = DEFAULT_SEED):
         """
         입력:
-            layout: WarehouseLayout
+            layout: GridWarehouseLayout
             lam: 주문 도착률 (orders/s)
             seed: 주문 생성 난수 시드
         """
@@ -234,67 +225,10 @@ class OrderManager:
         return sum(1 for o in self.all_orders if o.completion_time is not None)
 
 
-# 보상 함수
-
-def compute_reward(
-    robot:          Robot,
-    order_loc:      Tuple[float, float],
-    layout:         WarehouseLayout,
-    delta_d:        float,
-    robots:         Optional[List[Robot]] = None,
-    n_wait:         int   = 0,
-    num_robots:     int   = NUM_ROBOTS,
-    robot_capacity: int   = ROBOT_CAPACITY,
-    gamma_q:        float = REWARD_GAMMA_Q,
-    alpha_mid:      float = REWARD_ALPHA_MID,
-    alpha_idle:     float = REWARD_ALPHA_IDLE,
-    beta_depletion: float = REWARD_BETA_DEPLETION,
-) -> float:
-    """주문 배정 1건의 보상 계산
-
-    보상 = exp(-alpha · detour / D_MAX)
-           − gamma_q · 큐 압박
-           − beta_depletion (idle 로봇을 썼는데 빈 idle 로봇이 더 남지 않은 경우)
-
-    입력:
-        robot: 주문을 배정받은 로봇 (배정 직전 상태)
-        order_loc: 주문 위치
-        layout: WarehouseLayout
-        delta_d: 배정으로 늘어난 이동거리 (m)
-        robots: 후보 로봇 리스트 (소진 페널티 판단용)
-        n_wait: 현재 대기 큐 길이
-        num_robots: 큐 압박 정규화용 로봇 수
-        robot_capacity: 로봇 용량
-        gamma_q: 큐 압박 페널티 가중치
-        alpha_mid: mid-trip 삽입 시 detour 감쇠 계수
-        alpha_idle: idle 로봇 배정 시 detour 감쇠 계수
-        beta_depletion: idle 로봇 소진 페널티
-    출력:
-        보상값
-    """
-    alpha   = alpha_idle if robot.is_idle else alpha_mid
-
-    reward  = float(np.exp(-alpha * delta_d / layout.reward_d_max))
-
-    if gamma_q > 0.0:
-        queue_pressure = min(n_wait / max(1, num_robots * robot_capacity), 1.0)
-        reward        -= gamma_q * queue_pressure
-
-    if beta_depletion > 0.0 and robot.is_idle and robots is not None:
-        free_idle_left = sum(
-            1 for r in robots
-            if r.id != robot.id and r.is_idle and r.idle_slots == robot_capacity
-        )
-        if free_idle_left == 0:
-            reward -= beta_depletion
-
-    return reward
-
-
 # 시뮬레이터
 
 class SimulatorBase:
-    """이산 사건 기반 창고 시뮬레이터의 공통 부분
+    """그리드 창고 시뮬레이터의 공통 부분
 
     - 로봇 풀은 모든 워크스테이션이 공유, 초기 위치만 라운드로빈으로 분산
     - 대기 주문은 단일 FIFO 큐(OrderManager.wait_queue)로 관리
@@ -304,9 +238,8 @@ class SimulatorBase:
     하위 클래스는 _on_order_arrival()로 배정 정책 정의, 필요하면
     _on_trip_complete() 재정의
 
-    layout이 GridWarehouseLayout이면 로봇 이동을 셀 단위 틱(CELL_SIZE / ROBOT_SPEED)으로
-    시뮬레이션 (_run_grid)
-    - 배정 결정은 그대로 주문 도착 사건 시점, 결정 시점의 로봇 위치는 직전 틱 기준
+    로봇 이동은 셀 단위 틱(CELL_SIZE / ROBOT_SPEED)으로 시뮬레이션 (run)
+    - 배정 결정은 주문 도착 사건 시점, 결정 시점의 로봇 위치는 직전 틱 기준
     - 이동거리는 실제로 이동한 셀 수
     - 충돌 처리는 layout.motion으로 선택
       - "reactive": 매 틱 다음 셀이 비어 있으면 이동, 막히면 대기/우회
@@ -314,11 +247,11 @@ class SimulatorBase:
         시공간 경로로 계획해 예약표에 올리고, 매 틱 예약대로 이동 (_reserve_plan)
     """
 
-    def __init__(self, layout: WarehouseLayout, lam: float, seed: int,
+    def __init__(self, layout: GridWarehouseLayout, lam: float, seed: int,
                  sim_time: float, num_robots: int, robot_capacity: int):
         """
         입력:
-            layout: WarehouseLayout
+            layout: GridWarehouseLayout
             lam: 주문 도착률 (orders/s)
             seed: 주문 생성 난수 시드
             sim_time: 시뮬레이션 시간 (s)
@@ -340,16 +273,14 @@ class SimulatorBase:
         self.now       = 0.0
 
         self._robot_orders:          Dict[int, List[Order]] = {i: [] for i in range(num_robots)}
-        self._robot_trip_distance:   Dict[int, float]       = {i: 0.0 for i in range(num_robots)}
         self._total_sim_distance:    float                  = 0.0
         self._total_trips:           int                    = 0
         self._mid_trip_count:        int                    = 0
         self._extra_travel:          float                  = 0.0
         self._n_in_system:           int                    = 0
-        self.grid:                   bool                   = getattr(layout, "is_grid", False)
         self._blocked_time:          float                  = 0.0
         self._n_replans:             int                    = 0
-        self.reserve:                bool                   = self.grid and layout.motion == "reserve"
+        self.reserve:                bool                   = layout.motion == "reserve"
         self._n_plans:               int                    = 0
         self._n_plan_fail:           int                    = 0
         self._plan_time:             float                  = 0.0
@@ -381,7 +312,6 @@ class SimulatorBase:
         self.order_mgr.reset(seed)
         self.eq  = EventQueue()
         self._robot_orders          = {i: [] for i in range(self.num_robots)}
-        self._robot_trip_distance   = {i: 0.0 for i in range(self.num_robots)}
         self._total_sim_distance    = 0.0
         self._total_trips           = 0
         self._mid_trip_count        = 0
@@ -394,39 +324,54 @@ class SimulatorBase:
         self._plan_time             = 0.0
         for r in self.robots:
             r.reset()
-        if self.grid:
-            for r, pos in zip(self.robots, self.layout.initial_positions(self.num_robots)):
-                r.pos, r.park_spot = pos, pos
-            self._spots_taken = {r.park_spot for r in self.robots}
-            self._occ: Dict[Tuple[int, int], int] = {r.pos: r.id for r in self.robots}
-            self._last_move_time = 0.0
-            # 예약 모드: 지금 계획을 세우면 경로가 시작되는 틱 (주문 도착 시 직전 틱, 틱 처리 중이면 그 틱)
-            self._t0_ctx = 0
-            if self.reserve:
-                self._res = ReservationTable()
-                for r in self.robots:
-                    self._res.set_rest(r.id, self.layout.cell_index[r.pos], 0)
+        for r, pos in zip(self.robots, self.layout.initial_positions(self.num_robots)):
+            r.pos, r.park_spot = pos, pos
+        self._spots_taken = {r.park_spot for r in self.robots}
+        self._occ: Dict[Tuple[int, int], int] = {r.pos: r.id for r in self.robots}
+        self._last_move_time = 0.0
+        # 예약 모드: 지금 계획을 세우면 경로가 시작되는 틱 (주문 도착 시 직전 틱, 틱 처리 중이면 그 틱)
+        self._t0_ctx = 0
+        if self.reserve:
+            self._res = ReservationTable()
+            for r in self.robots:
+                self._res.set_rest(r.id, self.layout.cell_index[r.pos], 0)
         t0, n0 = self.order_mgr.next_arrival(0.0)
         self.eq.push(Event(t0, EVENT_ORDER_ARRIVAL, {"count": n0}))
         if self.recorder is not None:
             self.recorder.on_reset(self)
 
     def run(self):
-        """sim_time까지 사건을 시각 순으로 처리"""
-        if self.grid:
-            self._run_grid()
-            return
-        while self.eq:
-            ev = self.eq.pop()
-            if ev.time > self.sim_time:
+        """sim_time까지 진행. 고정 간격 틱으로 로봇 이동, 틱 사이에 도착한 주문은 도착 시각에 처리
+
+        틱 시각은 k · tick으로 주문 도착과 무관하게 고정
+        움직일 로봇도, 진행 중인 피킹/처리도 없으면 다음 주문 도착 직후 틱으로 건너뜀
+        """
+        dt = self.layout.tick
+        k  = 1
+        while True:
+            t_ev = self.eq.peek_time()
+            if not self._grid_active():
+                if math.isinf(t_ev):
+                    break
+                k = max(k, math.ceil(t_ev / dt))
+            t_tick = k * dt
+            if min(t_ev, t_tick) > self.sim_time:
                 break
-            self._advance_clock(ev.time)
-            if ev.etype == EVENT_ORDER_ARRIVAL:
+            if t_ev <= t_tick:
+                ev = self.eq.pop()
+                self._advance_clock(t_ev)
+                self._t0_ctx = k - 1
                 self._handle_order_event(ev)
-            elif ev.etype == EVENT_NODE_ARRIVAL:
-                self._handle_node_arrival(ev)
-            elif ev.etype == EVENT_TRIP_COMPLETE:
-                self._on_trip_complete(self.robots[ev.data["robot_id"]])
+            else:
+                self._advance_clock(t_tick)
+                self._t0_ctx = k
+                if self.reserve:
+                    self._reserve_tick(k)
+                else:
+                    self._grid_tick()
+                if self.recorder is not None:
+                    self.recorder.on_tick(self, k)
+                k += 1
         self._advance_clock(self.sim_time)
 
     def _handle_order_event(self, ev: Event):
@@ -439,27 +384,12 @@ class SimulatorBase:
             self.eq.push(Event(nxt, EVENT_ORDER_ARRIVAL, {"count": n}))
 
     def _advance_clock(self, t: float):
-        """시각을 t로 옮기며 [now, t] 구간의 상태를 _on_interval()에 전달
-
-        사건 사이에는 시스템 내 주문 수와 이동 중 로봇 수가 불변
+        """시각을 t로 옮김
 
         입력:
             t: 새 시각 (s)
         """
-        if t > self.now:
-            n_busy = sum(1 for r in self.robots if not r.is_idle)
-            self._on_interval(self.now, t, self._n_in_system, n_busy)
         self.now = t
-
-    def _on_interval(self, t0: float, t1: float, n_in_system: int, n_busy: int):
-        """사건 사이 구간 [t0, t1] 훅. 기본 구현은 no-op
-
-        입력:
-            t0, t1: 구간 시작/끝 시각 (s)
-            n_in_system: 구간 동안 시스템 내 주문 수 (도착 − 완료)
-            n_busy: 구간 동안 이동 중인 로봇 수
-        """
-        pass
 
     def _on_order_arrival(self):
         """새 주문 도착 시 배정 정책. 하위 클래스에서 구현"""
@@ -482,7 +412,7 @@ class SimulatorBase:
         출력:
             Robot 리스트
         """
-        # 워크스테이션 처리 중인 로봇은 트립이 끝나는 중이므로 삽입 후보에서 제외 (그리드 모드)
+        # 워크스테이션 처리 중인 로봇은 트립이 끝나는 중이므로 삽입 후보에서 제외
         busy     = [r for r in self.robots
                     if not r.is_idle and r.idle_slots > 0 and r.timer_kind != "ws"]
         idle_any = [r for r in self.robots if r.is_idle and r.idle_slots > 0]
@@ -500,14 +430,11 @@ class SimulatorBase:
             return 0.0
         if r.timer_kind == "ws":
             return r.timer
-        t = r.remaining_distance / ROBOT_SPEED
-        if self.grid:
-            orders = self._robot_orders[r.id]
-            t += r.timer + sum(o.pick_s for o in orders if not o.picked) \
-                 + sum(o.proc_s for o in orders)
-        return t
+        orders = self._robot_orders[r.id]
+        return (r.remaining_distance / ROBOT_SPEED + r.timer
+                + sum(o.pick_s for o in orders if not o.picked) + sum(o.proc_s for o in orders))
 
-    def _idle_return_target(self, loc: Tuple[float, float]) -> Tuple[float, float]:
+    def _idle_return_target(self, loc: Tuple[int, int]) -> Tuple[int, int]:
         """idle 로봇에 배정할 때 가정하는 복귀 지점 (주문 위치에서 가장 가까운 워크스테이션)
 
         입력:
@@ -518,8 +445,8 @@ class SimulatorBase:
         ws_id = nearest_workstation(loc, self.layout.workstations, self.layout.aisle_distance)
         return self.layout.workstations[ws_id]
 
-    def _insertion_delta(self, robot: Robot, loc: Tuple[float, float],
-                         target_coords: Tuple[float, float]) -> float:
+    def _insertion_delta(self, robot: Robot, loc: Tuple[int, int],
+                         target_coords: Tuple[int, int]) -> float:
         """로봇에 주문을 넣을 때 늘어나는 이동거리
 
         idle 로봇은 target_coords로 복귀한다고 가정, mid-trip 로봇은
@@ -566,29 +493,6 @@ class SimulatorBase:
         """
         self.order_mgr.record_service_start(order, t)
 
-    def _handle_node_arrival(self, ev: Event):
-        """로봇이 경유지에 도착했을 때 다음 이동 또는 트립 종료 처리
-
-        남은 경유지가 있으면 다음 지점으로, 없으면 복귀 워크스테이션으로 보냄
-        이미 워크스테이션에 도착했으면 트립 완료 사건 추가
-
-        입력:
-            ev: EVENT_NODE_ARRIVAL 사건 (data["robot_id"])
-        """
-        robot = self.robots[ev.data["robot_id"]]
-        robot.end_travel(self.now)
-        still_going = robot.arrive_at_node()
-
-        if still_going:
-            self._schedule_next(robot)
-            return
-
-        if robot.pos == robot.workstation:
-            self.eq.push(Event(self.now, EVENT_TRIP_COMPLETE, {"robot_id": robot.id}))
-        else:
-            robot.current_dest = robot.workstation
-            self._schedule_next(robot)
-
     def _complete_trip(self, robot: Robot):
         """트립을 마친 로봇을 idle로 되돌리고 실었던 주문 완료 처리
 
@@ -600,7 +504,6 @@ class SimulatorBase:
         robot.idle_slots   = self.robot_capacity
         robot.route        = []
         robot.current_dest = None
-        robot.progress     = 0.0
         completed = list(self._robot_orders.pop(robot.id, []))
         for o in completed:
             self.order_mgr.record_completion(o, self.now)
@@ -609,7 +512,7 @@ class SimulatorBase:
         self._robot_orders[robot.id]  = []
 
     def _schedule_next(self, robot: Robot):
-        """현재 목적지까지 이동 시작, 도착 사건 예약, 이동거리 누적
+        """현재 목적지로 출발. 실제 이동과 거리 집계는 매 틱 (_grid_tick / _reserve_tick)
 
         입력:
             robot: 이동할 로봇
@@ -620,26 +523,12 @@ class SimulatorBase:
             # 경로가 바뀐 경우에만 트립 전체 재계획
             if robot.route_version != robot.plan_version:
                 self._reserve_plan(robot)
-            robot.start_travel(self.now)
-            if robot.pos == robot.current_dest:
-                self._grid_on_arrive(robot)
-            return
-        if self.grid:
-            # 그리드 모드에서는 _grid_tick()이 셀 단위로 이동시키고 거리 집계
+        else:
             # 목적지가 바뀌었으므로 이전 우회 경로와 주차 칸 예약은 폐기
             robot.detour = []
             self._grid_release_spot(robot)
-            robot.start_travel(self.now)
-            if robot.pos == robot.current_dest:
-                self._grid_on_arrive(robot)
-            return
-        seg = max(0.0, self.layout.aisle_distance(robot.pos, robot.current_dest) - robot.progress)
-        self._robot_trip_distance[robot.id] += seg
-        self._total_sim_distance            += seg
-        t = self.now + seg / ROBOT_SPEED
-        robot.start_travel(self.now)
-        self.eq.push(Event(t, EVENT_NODE_ARRIVAL,
-                           {"robot_id": robot.id, "dest": robot.current_dest}))
+        if robot.pos == robot.current_dest:
+            self._grid_on_arrive(robot)
 
     def _dispatch(self, robot: Robot, orders: List[Order]):
         """대기 큐에서 꺼낸 주문들로 로봇의 새 트립 시작
@@ -675,15 +564,13 @@ class SimulatorBase:
         return self.layout.solo_rt_m - extra_per
 
     def build_result(self, label: str, episode: int, lam: float,
-                     reward: float = 0.0, epsilon: float = 0.0) -> EpisodeResult:
+) -> EpisodeResult:
         """현재 에피소드 지표를 EpisodeResult로 묶음
 
         입력:
             label: 정책 라벨
             episode: 에피소드 번호
             lam: 이번 에피소드의 주문 도착률
-            reward: 기록할 보상값
-            epsilon: 기록할 ε
         출력:
             EpisodeResult
         """
@@ -702,50 +589,15 @@ class SimulatorBase:
             mid_trip_rate        = self._mid_trip_count / max(1, self.order_mgr.completed_count()),
             extra_travel_m       = self._extra_travel,
             saving_per_insertion = self.saving_per_insertion(),
-            reward               = reward,
-            epsilon              = epsilon,
             blocked_time         = self._blocked_time,
             n_replans            = self._n_replans,
             n_plans              = self._n_plans,
             n_plan_fail          = self._n_plan_fail,
             plan_time_s          = self._plan_time,
+            sim_time             = self.sim_time,
         )
 
-    # 그리드 이동 엔진
-
-    def _run_grid(self):
-        """고정 간격 틱으로 로봇 이동, 틱 사이에 도착한 주문은 도착 시각에 처리
-
-        틱 시각은 k · tick으로 주문 도착과 무관하게 고정
-        움직일 로봇도, 진행 중인 피킹/처리도 없으면 다음 주문 도착 직후 틱으로 건너뜀
-        """
-        dt = self.layout.tick
-        k  = 1
-        while True:
-            t_ev = self.eq.peek_time()
-            if not self._grid_active():
-                if math.isinf(t_ev):
-                    break
-                k = max(k, math.ceil(t_ev / dt))
-            t_tick = k * dt
-            if min(t_ev, t_tick) > self.sim_time:
-                break
-            if t_ev <= t_tick:
-                ev = self.eq.pop()
-                self._advance_clock(t_ev)
-                self._t0_ctx = k - 1
-                self._handle_order_event(ev)
-            else:
-                self._advance_clock(t_tick)
-                self._t0_ctx = k
-                if self.reserve:
-                    self._reserve_tick(k)
-                else:
-                    self._grid_tick()
-                if self.recorder is not None:
-                    self.recorder.on_tick(self, k)
-                k += 1
-        self._advance_clock(self.sim_time)
+    # 이동 엔진
 
     def _grid_wants_move(self, r: Robot) -> bool:
         """트립 중이고 목적지로 이동해야 하는 로봇인지"""
@@ -830,8 +682,7 @@ class SimulatorBase:
                     del self._occ[r.pos]
                     self._occ[nxt] = r.id
                 r.pos = nxt
-                self._robot_trip_distance[r.id] += CELL_SIZE
-                self._total_sim_distance        += CELL_SIZE
+                self._total_sim_distance += CELL_SIZE
                 moved.add(r.id)
                 changed = True
 
@@ -901,11 +752,7 @@ class SimulatorBase:
         self._grid_after_node(r)
 
     def _grid_after_node(self, r: Robot):
-        """경유지 처리를 마친 뒤 다음 목적지로 보내거나, 복귀 도킹 셀이면 워크스테이션 처리 시작
-
-        연속 모드 _handle_node_arrival()과 같은 규칙
-        """
-        r.end_travel(self.now)
+        """경유지 처리를 마친 뒤 다음 목적지로 보내거나, 복귀 도킹 셀이면 워크스테이션 처리 시작"""
         if r.arrive_at_node():
             self._schedule_next(r)
             return
@@ -918,7 +765,6 @@ class SimulatorBase:
             r.idle_slots = slots
             r._start_move()
             self._reserve_plan(r)
-            r.start_travel(self.now)
             return
         if r.pos == r.workstation:
             proc = sum(o.proc_s for o in self._robot_orders[r.id])
@@ -941,7 +787,7 @@ class SimulatorBase:
         if r.is_idle and r.current_dest is None and not self.reserve:
             self._grid_assign_spot(r)
 
-    # 그리드 예약 모드 (motion="reserve")
+    # 예약 모드 (motion="reserve")
 
     def _reserve_tick(self, k: int):
         """예약 모드 한 틱: 타이머 -> 예약대로 이동 -> 도착 처리 -> 재계획 대기 로봇 재시도"""
@@ -956,8 +802,7 @@ class SimulatorBase:
                     if r.timer > 0.0:
                         raise RuntimeError(f"예약 불일치: 로봇 {r.id}가 {r.timer_kind} 중인데 {r.pos}->{cell} 이동 계획 (t={self.now:.0f})")
                     r.pos = cell
-                    self._robot_trip_distance[r.id] += CELL_SIZE
-                    self._total_sim_distance        += CELL_SIZE
+                    self._total_sim_distance += CELL_SIZE
                     moved.append(r)
                     continue
             elif r.plan and r.plan[0][0] < k:
@@ -1087,394 +932,3 @@ class SimulatorBase:
         r.pending_insert = list(locs)
         r.replan_pending = True
         return False
-
-
-class RLSimulator(SimulatorBase):
-    """DQNAgent가 주문마다 배정할 로봇을 고르는 시뮬레이터
-
-    - 후보: 빈 슬롯이 있는 모든 로봇(idle + mid-trip)
-    - 행동: 후보 리스트 내 인덱스
-    - 한 결정의 전이는 다음 결정 시점의 후보 특징이 나와야 완성되므로
-      직전 결정을 _pending에 보관
-    """
-
-    def __init__(self, layout: WarehouseLayout, agent: DQNAgent,
-                 lam: float, seed: int, sim_time: float = SIM_TIME,
-                 num_robots: int = NUM_ROBOTS, robot_capacity: int = ROBOT_CAPACITY,
-                 reward_cfg: Optional[Dict] = None,
-                 eval_mode: bool = False,
-                 reward_mode: str = REWARD_MODE_DEFAULT):
-        """
-        입력:
-            layout: WarehouseLayout
-            agent: 배정 정책 DQNAgent
-            lam: 주문 도착률 (orders/s)
-            seed: 주문 생성 난수 시드
-            sim_time: 시뮬레이션 시간 (s)
-            num_robots: 로봇 수
-            robot_capacity: 로봇 용량
-            reward_cfg: compute_reward 가중치 덮어쓰기용 kwargs
-            eval_mode: True이면 ε=0으로 실행하고 전이를 수집하지 않음
-            reward_mode: "legacy" (배정 시점 보상, 결정당 γ 할인) 또는
-                         "smdp" (결정 epoch 사이 시간 적분 비용, e^{-βτ} 할인)
-        """
-        assert reward_mode in ("legacy", "smdp"), reward_mode
-        super().__init__(layout, lam, seed, sim_time, num_robots, robot_capacity)
-        self.agent        = agent
-        self.reward_cfg   = reward_cfg or {}
-        self.total_reward = 0.0
-        self.eval_mode    = eval_mode
-        self.reward_mode  = reward_mode
-        # legacy: (feat, reward), smdp: (feat, 결정 시각)
-        self._pending: Optional[Tuple[np.ndarray, float]] = None
-        self._transitions: List[tuple] = []
-        self._smdp_cost = 0.0   # 직전 결정 이후 누적된 할인 비용
-
-    def reset(self, seed: int):
-        """에피소드 상태, 누적 보상, 보류 전이 초기화
-
-        입력:
-            seed: 주문 생성 난수 시드
-        """
-        super().reset(seed)
-        self.total_reward = 0.0
-        self._pending = None
-        self._smdp_cost = 0.0
-
-    def run(self) -> List[tuple]:
-        """에피소드 1회를 끝까지 실행
-
-        출력:
-            학습용 전이 리스트 [(feat, reward, next_feats, done, discount), ...]
-            (eval_mode이면 빈 리스트)
-        """
-        self._transitions = []
-        saved_epsilon = self.agent.epsilon
-        if self.eval_mode:
-            self.agent.epsilon = 0.0
-
-        super().run()
-
-        # 마지막 결정은 다음 상태가 없으므로 done=True로 마감
-        # smdp이면 sim_time까지 누적된 비용이 마지막 보상
-        if self.reward_mode == "smdp":
-            self._close_smdp_interval()
-        if not self.eval_mode and self._pending is not None:
-            feat, r, g = self._pending_transition(self.sim_time)
-            self._transitions.append((feat, r, None, True, g))
-            self._pending = None
-
-        if self.eval_mode:
-            self.agent.epsilon = saved_epsilon
-        return self._transitions
-
-    def _on_order_arrival(self):
-        """새 주문을 에이전트가 고른 로봇에 배정하고 보상 계산
-
-        후보가 없으면 주문을 대기 큐에 넣음
-        학습 모드이면 직전 결정의 전이를 완성해 _transitions에 추가, 이번 결정은 _pending에 보류
-        """
-        order    = self.order_mgr.create_order(self.now)
-        eligible = self._eligible_robots()
-
-        if not eligible:
-            self.order_mgr.enqueue(order, self.now)
-            return
-
-        n_wait      = self.order_mgr.queue_size()
-        ws_capacity = self.num_robots * self.robot_capacity
-        cand_feats  = self.agent.build_candidates(
-            order.loc, eligible, n_wait, layout=self.layout, now=self.now,
-            ws_capacity=ws_capacity,
-        )
-        target_coords = self._idle_return_target(order.loc)
-
-        idx = self.agent.select_index(cand_feats)
-        if idx < 0:
-            idx = int(np.argmin([
-                self._insertion_delta(r, order.loc, target_coords) for r in eligible
-            ]))
-
-        robot       = eligible[idx]
-        chosen_feat = cand_feats[idx]
-        if self.recorder is not None:
-            self.recorder.on_rl_decision(self, order, eligible, cand_feats, idx, target_coords)
-
-        # 배정 전 상태 기준 detour 측정 (보상 및 extra_travel 집계용)
-        delta_d = self._insertion_delta(robot, order.loc, target_coords)
-        self._extra_travel += delta_d
-
-        if self.reward_mode == "legacy":
-            reward = compute_reward(
-                robot, order.loc, self.layout, delta_d,
-                robots=eligible,
-                n_wait=n_wait,
-                num_robots=len(eligible),
-                robot_capacity=self.robot_capacity,
-                **self.reward_cfg,
-            )
-            self.total_reward += reward
-        else:
-            self._close_smdp_interval()
-
-        self._assign_order(robot, order)
-
-        # 직전 결정을 지금의 후보 특징으로 완성, 이번 결정은 보류
-        if not self.eval_mode and self._pending is not None:
-            feat_prev, r_prev, g_prev = self._pending_transition(self.now)
-            self._transitions.append((feat_prev, r_prev, cand_feats, False, g_prev))
-        if self.reward_mode == "legacy":
-            self._pending = (chosen_feat, reward)
-        else:
-            self._pending = (chosen_feat, self.now)
-            self._smdp_cost = 0.0
-
-    def _on_interval(self, t0: float, t1: float, n_in_system: int, n_busy: int):
-        """smdp 모드에서 [t0, t1] 구간 비용을 직전 결정 시각 기준으로 할인해 누적
-
-        구간 비용률 c = N(t) + c_d · v · busy(t) 는 구간 안에서 상수이므로
-        ∫_{t0}^{t1} e^{-β(t-t_k)} c dt = c · (e^{-β(t0-t_k)} − e^{-β(t1-t_k)}) / β.
-
-        입력:
-            t0, t1: 구간 시작/끝 시각 (s)
-            n_in_system: 시스템 내 주문 수
-            n_busy: 이동 중 로봇 수
-        """
-        if self.reward_mode != "smdp" or self._pending is None:
-            return
-        t_k  = self._pending[1]
-        rate = n_in_system + SMDP_COST_DIST * ROBOT_SPEED * n_busy
-        self._smdp_cost += rate * (math.exp(-SMDP_BETA * (t0 - t_k))
-                                   - math.exp(-SMDP_BETA * (t1 - t_k))) / SMDP_BETA
-
-    def _close_smdp_interval(self):
-        """직전 결정 이후 누적된 비용을 보상으로 확정해 total_reward에 합산"""
-        if self._pending is None:
-            return
-        r = -self._smdp_cost / SMDP_REWARD_SCALE
-        self.total_reward += r
-        self._pending = (self._pending[0], self._pending[1], r)
-
-    def _pending_transition(self, t_next: float) -> Tuple[np.ndarray, float, float]:
-        """보류 중인 직전 결정을 (feat, reward, discount)로 변환
-
-        입력:
-            t_next: 다음 결정 시각 (s)
-        출력:
-            (선택 후보 특징, 보상, 이 전이의 할인 계수)
-        """
-        if self.reward_mode == "legacy":
-            feat, r = self._pending
-            return feat, r, GAMMA
-        feat, t_k, r = self._pending
-        return feat, r, math.exp(-SMDP_BETA * (t_next - t_k))
-
-
-class RLWaitSimulator(RLSimulator):
-    """SMDP 정식화 (reward_mode="smdp_w")
-
-    - 결정 epoch: 모든 주문 도착 (후보가 없어도 epoch)
-    - 행동: 후보 로봇 ∪ {wait}. wait는 후보 특징의 마지막 행
-      - 운행 중 로봇이 있을 때만 허용 (대기 주문은 트립 완료 시 FIFO로 방출되므로)
-      - 후보가 없으면 wait만 남음 (강제 대기)
-    - 비용률: N(t) + (κ / T_w) · Σ 대기 주문 나이 + c_d · v · busy(t)
-    - 보상: −(할인 적분 비용) / scale + e^{-βτ} Φ(s') − Φ(s)
-    """
-
-    def __init__(self, *args, **kwargs):
-        """입력은 RLSimulator와 동일 (reward_mode는 무시)"""
-        kwargs["reward_mode"] = "smdp"      # 구간 적분/할인 처리는 smdp 경로 재사용
-        super().__init__(*args, **kwargs)
-        assert self.agent.feature_set == "smdp_w", self.agent.feature_set
-        self._phi_prev = 0.0
-        self._ia_ema   = 1.0 / self.lam     # 도착 간격 지수이동평균 (s)
-        self._last_arr = 0.0
-        self._n_wait   = 0
-        self._n_forced = 0
-
-    def reset(self, seed: int):
-        """에피소드 상태, 퍼텐셜, 도착 간격 추정, wait 집계 초기화
-
-        입력:
-            seed: 주문 생성 난수 시드
-        """
-        super().reset(seed)
-        self._phi_prev = 0.0
-        self._ia_ema   = 1.0 / self.lam
-        self._last_arr = 0.0
-        self._n_wait   = 0
-        self._n_forced = 0
-
-    def _ws_state(self) -> np.ndarray:
-        """워크스테이션별 상태 (정규화 전)
-
-        [도킹 잔여 처리 시간 (s), 대기열 셀 점유율, 복귀 예정 로봇 수, 복귀 예정 작업량 (s)]
-        대기열 셀 점유율은 그리드 모드에서만 채움
-
-        출력:
-            (K, WS_FEAT_DIM) float32 배열
-        """
-        ws = np.zeros((self.num_workstations, WS_FEAT_DIM), dtype=np.float32)
-        for r in self.robots:
-            if r.is_idle:
-                continue
-            k = r.workstation_id
-            if r.timer_kind == "ws":
-                ws[k, 0] = r.timer
-            else:
-                ws[k, 2] += 1.0
-                ws[k, 3] += sum(o.proc_s for o in self._robot_orders[r.id])
-        if self.grid:
-            occ = {r.pos for r in self.robots}
-            for k, cells in enumerate(self.layout.queue_cells):
-                ws[k, 1] = sum(c in occ for c in cells) / len(cells)
-        return ws
-
-    def _context(self) -> Dict:
-        """결정 시점의 전역/로봇별/워크스테이션별 상태 (DQNAgent.build_candidates_w 입력)
-
-        출력:
-            glob: [대기 주문 평균 나이, 운행 로봇 비율, 빈 슬롯 비율, 도착 간격, 가장 빠른 트립 완료까지 시간]
-            robot: {운행 중 로봇 id: (남은 피킹 수, 트립 잔여시간 (s), WS 처리 시간 합 (s))}
-            ws: _ws_state() 결과
-            n_wait: 대기 큐 길이
-            num_robots: 로봇 수
-        """
-        cap   = self.num_robots * self.robot_capacity
-        ages  = [self.now - o.arrival_time for o in self.order_mgr.wait_queue]
-        robot = {}
-        for r in self.robots:
-            if r.is_idle:
-                continue
-            orders = self._robot_orders[r.id]
-            robot[r.id] = (sum(not o.picked for o in orders), self._robot_time_left(r),
-                           sum(o.proc_s for o in orders))
-        t_free = min((v[1] for v in robot.values()), default=0.0)
-        glob = [
-            min((sum(ages) / len(ages) if ages else 0.0) / SMDP_WAIT_TREF, 5.0),
-            len(robot) / self.num_robots,
-            sum(r.idle_slots for r in self.robots) / cap,
-            min(self._ia_ema / SMDP_IA_NORM, 3.0),
-            min(t_free / STATE_MAX_TIME, 1.0),
-        ]
-        return {"glob": glob, "robot": robot, "ws": self._ws_state(),
-                "n_wait": len(ages), "num_robots": self.num_robots}
-
-    def _potential(self, ctx: Dict) -> float:
-        """Φ(s) = −(배정/대기 주문의 예상 잔여 비용) / scale
-
-        - 운행 중 로봇: 적재 주문 수 × 트립 잔여시간 + c_d · 잔여 이동거리
-        - 대기 주문: 단독 왕복 (시간 + c_d · 거리). 대기 자체의 비용은 환경 보상으로만 반영
-        방금 도착한 미배정 주문은 행동과 무관한 상수라 제외
-
-        입력:
-            ctx: _context() 결과
-        출력:
-            퍼텐셜 값 (보상과 같은 스케일)
-        """
-        cost = 0.0
-        for r in self.robots:
-            if r.id in ctx["robot"]:
-                cost += (len(self._robot_orders[r.id]) * ctx["robot"][r.id][1]
-                         + SMDP_COST_DIST * r.remaining_distance)
-        solo  = self.layout.solo_rt_m * (1.0 / ROBOT_SPEED + SMDP_COST_DIST)
-        cost += ctx["n_wait"] * solo
-        return -cost / SMDP_REWARD_SCALE
-
-    def _on_order_arrival(self):
-        """새 주문을 에이전트가 고른 로봇에 배정하거나 대기 큐에 넣음
-
-        직전 결정의 보상을 이번 결정 전 상태의 퍼텐셜로 확정
-        학습 모드이면 직전 결정의 전이를 완성해 _transitions에 추가, 이번 결정은 _pending에 보류
-        """
-        self._ia_ema  += SMDP_IA_EMA * ((self.now - self._last_arr) - self._ia_ema)
-        self._last_arr = self.now
-
-        order    = self.order_mgr.create_order(self.now)
-        eligible = self._eligible_robots()
-        can_wait = any(not r.is_idle for r in self.robots)
-        ctx      = self._context()
-        cand_feats = self.agent.build_candidates_w(
-            order.loc, eligible, self.layout, ctx, now=self.now, with_wait=can_wait)
-        idx = self.agent.select_index(cand_feats)
-
-        phi = self._potential(ctx)
-        self._close_smdp_interval(phi)
-
-        if idx == len(eligible):
-            self.order_mgr.enqueue(order, self.now)
-            self._n_wait   += 1
-            self._n_forced += int(not eligible)
-        else:
-            robot         = eligible[idx]
-            target_coords = self._idle_return_target(order.loc)
-            if self.recorder is not None:
-                self.recorder.on_rl_decision(self, order, eligible, cand_feats[:len(eligible)],
-                                             idx, target_coords)
-            self._extra_travel += self._insertion_delta(robot, order.loc, target_coords)
-            self._assign_order(robot, order)
-
-        if not self.eval_mode and self._pending is not None:
-            feat_prev, r_prev, g_prev = self._pending_transition(self.now)
-            self._transitions.append((feat_prev, r_prev, cand_feats, False, g_prev))
-        self._pending   = (cand_feats[idx], self.now)
-        self._smdp_cost = 0.0
-        self._phi_prev  = phi
-
-    def _on_interval(self, t0: float, t1: float, n_in_system: int, n_busy: int):
-        """[t0, t1] 구간 비용을 직전 결정 시각 기준으로 할인해 누적
-
-        구간 안에서 비용률은 c0 + m · (t − t0) (대기 주문 나이가 선형 증가)
-        ∫ e^{-β(t-t_k)} (c0 + m · (t − t0)) dt
-          = c0 · (E0 − E1) / β + m · (E0 − E1 · (1 + β · (t1 − t0))) / β²
-
-        입력:
-            t0, t1: 구간 시작/끝 시각 (s)
-            n_in_system: 시스템 내 주문 수 (대기 주문 포함)
-            n_busy: 이동 중 로봇 수
-        """
-        if self._pending is None:
-            return
-        t_k = self._pending[1]
-        q   = self.order_mgr.wait_queue
-        w   = SMDP_WAIT_KAPPA / SMDP_WAIT_TREF
-        c0  = (n_in_system + SMDP_COST_DIST * ROBOT_SPEED * n_busy
-               + w * sum(t0 - o.arrival_time for o in q))
-        m   = w * len(q)
-        b   = SMDP_BETA
-        e0  = math.exp(-b * (t0 - t_k))
-        e1  = math.exp(-b * (t1 - t_k))
-        self._smdp_cost += c0 * (e0 - e1) / b + m * (e0 - e1 * (1.0 + b * (t1 - t0))) / (b * b)
-
-    def _close_smdp_interval(self, phi_next: float = 0.0):
-        """직전 결정 이후 누적 비용에 shaping 항을 더해 보상 확정
-
-        total_reward에는 shaping을 뺀 환경 보상만 합산
-
-        입력:
-            phi_next: 다음 결정 전 상태의 퍼텐셜 (에피소드 종료 시 0)
-        """
-        if self._pending is None:
-            return
-        feat, t_k = self._pending[0], self._pending[1]
-        r_env = -self._smdp_cost / SMDP_REWARD_SCALE
-        self.total_reward += r_env
-        g = math.exp(-SMDP_BETA * (self.now - t_k))
-        self._pending = (feat, t_k, r_env + g * phi_next - self._phi_prev)
-
-    def build_result(self, *args, **kwargs) -> EpisodeResult:
-        """SimulatorBase.build_result()에 wait 집계 추가"""
-        res = super().build_result(*args, **kwargs)
-        res.n_wait_action, res.n_forced_wait = self._n_wait, self._n_forced
-        return res
-
-
-def rl_simulator_cls(reward_mode: str):
-    """reward_mode에 맞는 RL 시뮬레이터 클래스
-
-    입력:
-        reward_mode: "legacy", "smdp", "smdp_w"
-    출력:
-        RLWaitSimulator ("smdp_w") 또는 RLSimulator
-    """
-    return RLWaitSimulator if reward_mode == "smdp_w" else RLSimulator

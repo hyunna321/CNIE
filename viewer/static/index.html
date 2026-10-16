@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MTSR Sim Viewer</title>
 <style>
-/* 레이아웃: 왼쪽 설정 | 가운데 창고 지도 + 재생 막대 | 오른쪽 지표·로봇·RL 결정 */
+/* 레이아웃: 왼쪽 설정 | 가운데 창고 지도 + 재생 막대 | 오른쪽 지표·로봇 */
 :root {
   --bg: #f4f5f7; --panel: #ffffff; --line: #dfe2e8; --fg: #1d2330; --muted: #677085;
   --accent: #2f5bd3; --accent-fg: #ffffff; --warn-bg: #fff4e0; --warn-fg: #8a5300;
@@ -78,16 +78,6 @@ button:disabled { opacity: .5; cursor: default; }
 canvas.chart { width: 100%; height: 86px; display: block; border: 1px solid var(--line); border-radius: 5px; margin-bottom: 4px; }
 .chartlabel { display: flex; gap: 10px; font-size: 11px; color: var(--muted); margin-top: 6px; }
 .chartlabel i { display: inline-block; width: 10px; height: 2px; vertical-align: 3px; margin-right: 3px; }
-table { width: 100%; border-collapse: collapse; font: 11px var(--mono); font-variant-numeric: tabular-nums; }
-th, td { text-align: right; padding: 2px 4px; border-bottom: 1px solid var(--line); }
-th:first-child, td:first-child { text-align: left; }
-tr.sel td { font-weight: 700; }
-.dec { border: 1px solid var(--line); border-radius: 5px; padding: 5px 7px; margin-bottom: 5px; cursor: pointer; }
-.dec:hover { border-color: var(--accent); }
-.dec .hd { display: flex; justify-content: space-between; font: 11px var(--mono); }
-.tag { font: 600 10px var(--mono); padding: 1px 5px; border-radius: 3px; }
-.tag.ok { background: #d8f2e3; color: #13633a; } .tag.diff { background: #fde2dc; color: #9b2412; }
-@media (prefers-color-scheme: dark) { .tag.ok { background: #183d29; color: #8fe0b0; } .tag.diff { background: #47201a; color: #ffab9a; } }
 .robotinfo { font: 12px var(--mono); white-space: pre-wrap; word-break: break-all; }
 .rlist { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 4px; }
 .rchip { display: grid; grid-template-columns: 12px 1fr auto; align-items: center; gap: 5px; padding: 3px 6px;
@@ -114,11 +104,6 @@ tr.sel td { font-weight: 700; }
     <div class="presets" id="presets"></div>
     <h2>배정 정책</h2>
     <label>정책<select id="policy"></select></label>
-    <div id="ckptBox" hidden>
-      <label>체크포인트<select id="ckptSel"></select></label>
-      <label>경로 직접 입력<input id="ckptPath" placeholder="logs_grid_.../agent.pt"></label>
-      <div class="note" id="ckptMeta"></div>
-    </div>
     <h2>시스템</h2>
     <label>주문 도착률 λ<small>orders/hr</small><input id="lam_hr" type="number" value="800" min="1"></label>
     <label>로봇 수 M<input id="num_robots" type="number" value="14" min="1" max="40"></label>
@@ -177,11 +162,6 @@ tr.sel td { font-weight: 700; }
     <canvas class="chart" id="ch2"></canvas>
     <div class="chartlabel"><span><i style="background:var(--fg)"></i>평균 흐름시간 (최근 10분, s)</span></div>
     <canvas class="chart" id="ch3"></canvas>
-    <div id="rlBox" hidden>
-      <h2>RL 결정 (현재 시각 직전)</h2>
-      <div class="note" id="rlStats"></div>
-      <div id="decisions"></div>
-    </div>
   </aside>
 </div>
 <script id="embedded-run" type="application/json">null</script>
@@ -260,7 +240,6 @@ function collectScenario() {
 function collectConfig() {
   const c = { policy: $("policy").value, scenario: collectScenario(), traffic: $("traffic").value, motion: $("motion").value };
   for (const k of ["lam_hr", "num_robots", "num_workstations", "robot_capacity", "sim_time", "seed"]) c[k] = parseFloat($(k).value);
-  if (c.policy === "RL") c.checkpoint = $("ckptPath").value || $("ckptSel").value;
   return c;
 }
 async function initMeta() {
@@ -269,30 +248,17 @@ async function initMeta() {
   fillSelect($("arrival"), META.enums.arrival, ARRIVAL_NAMES);
   fillSelect($("sku_dist"), META.enums.sku_dist, SKU_NAMES);
   fillSelect($("storage"), META.enums.storage, STORAGE_NAMES);
-  $("ckptSel").innerHTML = META.checkpoints.length ? META.checkpoints.map(p => `<option>${p}</option>`).join("")
-                                                   : `<option value="">(저장소에 *.pt 없음)</option>`;
   renderParams({});
   $("presets").innerHTML = Object.keys(PRESETS).map(n => `<button type="button" data-p="${n}">${n}</button>`).join("");
   $("presets").onclick = e => { const p = e.target.dataset.p; if (p !== undefined) applyScenario(PRESETS[p]); };
   $("arrival").onchange = () => renderParams(collectScenario());
   $("sku_dist").onchange = () => renderParams(collectScenario());
-  $("policy").onchange = () => { $("ckptBox").hidden = $("policy").value !== "RL"; showCkptMeta(); };
-  $("ckptSel").onchange = showCkptMeta; $("ckptPath").onchange = showCkptMeta;
   $("runBtn").onclick = runSim;
-  // 주소로 바로 실행: #autorun&policy=RL&preset=웨이브 도착&t=900
+  // 주소로 바로 실행: #autorun&policy=BL4&preset=웨이브 도착&t=900
   const h = new URLSearchParams(decodeURIComponent(location.hash.slice(1)));
-  if (h.has("policy")) { $("policy").value = h.get("policy"); $("policy").onchange(); }
+  if (h.has("policy")) $("policy").value = h.get("policy");
   if (h.has("preset") && PRESETS[h.get("preset")]) applyScenario(PRESETS[h.get("preset")]);
   if (h.has("autorun")) { await runSim(); if (h.has("t") && TR) setTick(Math.round(parseFloat(h.get("t")) / TR.dt)); }
-}
-async function showCkptMeta() {
-  const path = $("ckptPath").value || $("ckptSel").value;
-  if ($("policy").value !== "RL" || !path) { $("ckptMeta").textContent = ""; return; }
-  const r = await (await fetch("/api/checkpoint", { method: "POST", body: JSON.stringify({ path }) })).json();
-  if (r.error) { $("ckptMeta").textContent = r.error; return; }
-  const m = r.meta || {};
-  $("ckptMeta").textContent = m.lam ? `학습: λ=${Math.round(m.lam * 3600)}/hr, M=${m.num_robots}, K=${m.num_workstations}, ` +
-    `${m.grid ? `grid ${m.traffic}/${m.motion}` : "연속 레이아웃"}, ${m.episodes} episodes` : "학습 조건 기록 없음";
 }
 async function runSim() {
   const btn = $("runBtn");
@@ -318,17 +284,12 @@ function loadRun(res) {
   const c = res.config;
   $("runinfo").textContent = `${META ? META.policies[c.policy] : c.policy} · λ=${c.lam_hr}/hr · M=${c.num_robots} · K=${c.num_workstations} · ` +
     `${c.traffic}/${c.motion} · ${c.scenario.arrival}/${c.scenario.sku_dist}/${c.scenario.storage} · seed ${c.seed}` +
-    (res.git ? ` · git ${res.git}` : "") + (c.checkpoint ? ` · ${c.checkpoint}` : "");
+    (res.git ? ` · git ${res.git}` : "");
   if (res.warnings && res.warnings.length) $("warn").textContent = res.warnings.join(" ");
   if (res.id) { $("exportBtn").href = `/api/export?id=${res.id}`; $("exportBtn").hidden = false; }
   $("empty").hidden = true;
   $("slider").max = TR.n_ticks - 1; tick = 0; selRobot = -1;
   renderKpis(); buildBackground(); buildHeat(); renderLegend(); buildRobotList();
-  $("rlBox").hidden = !(TR.decisions && TR.decisions.length);
-  if (!$("rlBox").hidden) {
-    const agree = TR.decisions.filter(d => d.chosen === d.bl6).length;
-    $("rlStats").textContent = `결정 ${TR.decisions.length}건 · BL6(한계비용 최소)와 같은 로봇 선택 ${(100 * agree / TR.decisions.length).toFixed(1)}%`;
-  }
   draw();
 }
 function renderKpis() {
@@ -476,7 +437,7 @@ function draw() {
   }
   $("timeLabel").textContent = `t = ${fmtT(t)}  (${tick}/${TR.n_ticks - 1})`;
   $("slider").value = tick;
-  drawCharts(t); renderRobot(); updateRobotList(); renderDecisions(t);
+  drawCharts(t); renderRobot(); updateRobotList();
 }
 const fmtT = s => { s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return `${h}:${String(m).padStart(2, "0")}:${String(x).padStart(2, "0")}`; };
 
@@ -501,7 +462,7 @@ function drawCharts(t) {
   chart("ch3", [m.avg_flow], [css("--fg")], t);
 }
 
-// 로봇 상세, RL 결정
+// 로봇 상세
 
 function renderRobot() {
   if (selRobot < 0) { $("robotInfo").textContent = "로봇 목록이나 지도에서 로봇을 고르세요"; return; }
@@ -512,21 +473,6 @@ function renderRobot() {
   $("robotInfo").textContent = `R${selRobot}  위치 (${x}, ${y})  상태 ${ST_LABELS[st]}\n적재/배정 주문 ${myOrders.length}건 (토트 ${load})\n` +
     `남은 방문: ${visits || "없음"}${rv && rv[2].length ? ` → WS${ws}` : ""}\n복귀 워크스테이션 WS${ws}\n예약 경로 남은 길이: ${plan.length} 틱`;
 }
-function renderDecisions(t) {
-  if ($("rlBox").hidden) return;
-  const D = TR.decisions; let hi = D.length - 1, lo = 0, end = -1;
-  while (lo <= hi) { const m = (lo + hi) >> 1; if (D[m].t <= t) { end = m; lo = m + 1; } else hi = m - 1; }
-  const rows = [];
-  for (let j = end; j >= 0 && j > end - 6; j--) {
-    const d = D[j], same = d.chosen === d.bl6;
-    const tbl = d.cands.map(c => `<tr class="${c.robot === d.chosen ? "sel" : ""}"><td>R${c.robot}${c.idle ? " idle" : ""}</td><td>${c.q}</td><td>${c.dd}</td><td>${c.mc}</td><td>${c.load}</td></tr>`).join("");
-    rows.push(`<div class="dec" data-t="${d.t}"><div class="hd"><span>${fmtT(d.t)} · 주문 #${d.order} @(${LAY.cells[d.loc]})</span>` +
-      `<span class="tag ${same ? "ok" : "diff"}">RL R${d.chosen} / BL6 R${d.bl6}</span></div>` +
-      `<table><tr><th>후보</th><th>Q</th><th>Δd m</th><th>한계비용</th><th>적재</th></tr>${tbl}</table></div>`);
-  }
-  $("decisions").innerHTML = rows.join("") || `<div class="note">아직 결정 없음</div>`;
-}
-
 // 재생
 
 function setTick(k) { tick = Math.max(0, Math.min(TR ? TR.n_ticks - 1 : 0, k)); draw(); }
@@ -579,14 +525,13 @@ $("map").onclick = e => {
 };
 $("robotList").onclick = e => { const b = e.target.closest(".rchip"); if (!b) return; const i = parseInt(b.dataset.r);
   selRobot = selRobot === i ? -1 : i; if ($("paths").value === "") $("paths").value = "sel"; draw(); };
-$("decisions").onclick = e => { const el = e.target.closest(".dec"); if (el) { togglePlay(false); setTick(Math.round(parseFloat(el.dataset.t) / TR.dt)); } };
 window.addEventListener("resize", () => { if (TR) { buildBackground(); buildHeat(); draw(); } });
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (TR) { buildBackground(); buildHeat(); renderLegend(); draw(); } });
 
 // 시작: 내보낸 파일이면 내장 기록을 재생, 아니면 서버에서 설정 불러오기
 const embedded = JSON.parse($("embedded-run").textContent);
 if (embedded) {
-  META = { policies: { BL1: "BL1 Full-Buffer", BL2: "BL2 Partial-Buffer", BL3: "BL3 Random", BL4: "BL4 Nearest", BL5: "BL5 Min-Insertion", BL6: "BL6 Marginal-Cost", GR: "Greedy-R", RL: "RL" } };
+  META = { policies: { BL1: "BL1 Full-Buffer", BL2: "BL2 Partial-Buffer", BL3: "BL3 Random", BL4: "BL4 Nearest", BL5: "BL5 Min-Insertion", BL6: "BL6 Marginal-Cost" } };
   $("cfgPanel").innerHTML = `<h2>내보낸 실행 (읽기 전용)</h2><div class="robotinfo">${JSON.stringify(embedded.config, null, 1).replace(/[{}"]/g, "")}</div>` +
     `<div class="warn" id="warn">${(embedded.warnings || []).join(" ")}</div>`;
   embedded.id = null; loadRun(embedded);

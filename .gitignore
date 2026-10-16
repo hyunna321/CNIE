@@ -1,5 +1,3 @@
 __pycache__/
 *.pyc
 .venv/
-*.pt
-logs_reward_compare/

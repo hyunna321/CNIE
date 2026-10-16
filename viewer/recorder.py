@@ -1,7 +1,6 @@
-"""그리드 시뮬레이션 기록기: 매 틱 로봇 위치/상태, 경로·예약 변경, 주문 수명, 지표, 혼잡 히트맵, RL 결정
+"""그리드 시뮬레이션 기록기: 매 틱 로봇 위치/상태, 경로·예약 변경, 주문 수명, 지표, 혼잡 히트맵
 
-SimulatorBase.recorder에 붙이면 시뮬레이터가 on_reset / on_tick / on_plan / on_rl_decision을 호출
-그리드 모드 전용
+SimulatorBase.recorder에 붙이면 시뮬레이터가 on_reset / on_tick / on_plan을 호출
 """
 import base64
 from collections import deque
@@ -20,9 +19,6 @@ METRIC_EVERY = 10   # 틱, 시계열 지표 기록 간격
 class Recorder:
     """매 틱 상태를 바이트 배열로 모으고, 끝나면 뷰어용 dict로 묶음"""
 
-    def __init__(self, record_decisions: bool = True):
-        self.record_decisions = record_decisions
-
     def on_reset(self, sim):
         L = sim.layout
         self.M        = sim.num_robots
@@ -32,7 +28,6 @@ class Recorder:
         self.prev_pos = [r.pos for r in sim.robots]
         self.route_ev: List[list] = []       # [틱, 로봇, [방문 셀 인덱스...]]
         self.plan_ev:  List[list] = []       # [시작 틱, 로봇, [셀 인덱스...]]
-        self.decisions: List[dict] = []
         self.assigned: Dict[int, int] = {}  # 주문 id -> 로봇
         self.metrics = {k: array("f") for k in
                         ("t", "in_system", "queue", "busy", "waiting", "completed", "avg_flow")}
@@ -58,25 +53,6 @@ class Recorder:
 
     def on_plan(self, sim, r, t0: int, cells: List[int]):
         self.plan_ev.append([t0, r.id, list(cells)])
-
-    def on_rl_decision(self, sim, order, eligible, cand_feats, idx, target_coords):
-        if not self.record_decisions:
-            return
-        import torch
-        from baselines import MarginalCostSimulator
-        with torch.no_grad():
-            q = sim.agent.policy_net(torch.tensor(cand_feats)).numpy().reshape(-1)
-        dd  = [sim._insertion_delta(r, order.loc, target_coords) for r in eligible]
-        mc  = [MarginalCostSimulator._marginal_cost(sim, r, order, target_coords) for r in eligible]
-        L = sim.layout
-        self.decisions.append({
-            "t": round(sim.now, 2), "order": order.order_id, "loc": L.cell_index[order.loc],
-            "cands": [{"robot": r.id, "q": round(float(q[i]), 4), "dd": round(dd[i], 1),
-                       "mc": round(mc[i], 1), "idle": bool(r.is_idle), "load": len(sim._robot_orders[r.id])}
-                      for i, r in enumerate(eligible)],
-            "chosen": eligible[idx].id, "bl6": eligible[int(np.argmin(mc))].id,
-            "queue": sim.order_mgr.queue_size(),
-        })
 
     # 내부
 
@@ -144,7 +120,7 @@ class Recorder:
             "n_ticks": self.last_k + 1, "dt": self.dt, "M": self.M,
             "frames": base64.b64encode(bytes(self.frames)).decode(),
             "route_ev": self.route_ev, "plan_ev": self.plan_ev,
-            "orders": orders, "decisions": self.decisions,
+            "orders": orders,
             "metrics": {k: [None if (isinstance(x, float) and x != x) else round(x, 2) for x in v]
                         for k, v in self.metrics.items()},
             "heat_occ": self.occ.tolist(), "heat_wait": self.wait.tolist(),
