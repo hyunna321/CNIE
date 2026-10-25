@@ -12,6 +12,12 @@
   - nested: 학습 시드를 뽑은 뒤 그 안에서 테스트 시드를 따로 복원추출 (전형적 계층 부트스트랩)
   p값 = 부트스트랩 분포가 0의 반대쪽에 놓인 비율 × 2, Holm으로 전체 비교에 대해 보정
 
+리비전 (experiments/revision_analyze.py가 사용)
+  load_records / metric_value: eval.csv 행 전체와 파생 지표 (J, blocked_per_robot, decision_rate, completion_rate)
+  seed_level_compare: 학습 시드 단위 (시드별 평균 차이, nested 부트스트랩 CI, 시드 간 대응 t, 나은 시드 수, ΔF%)
+  rule_compare: 규칙 기반끼리 인스턴스 간 대응 t, holm_table: 표 단위 Holm
+  factorial_effects: 2^k 요인 설계 주효과·2요인 상호작용 (±1 코딩 최소제곱)
+
 혼합효과 모형 (statsmodels MixedLM, --mixed)
   y ~ C(policy, Treatment(ref)) + 분산성분 (1|테스트 시드) + (1|run)   (셀마다 적합, --mixed-by로 묶음 변경)
   run = 정책 그룹 × 학습 시드 (베이스라인은 run 1개). 학습 시드가 2개 이상인 그룹이 없으면 run 성분 생략
@@ -327,14 +333,183 @@ def fit_mixed(rows: List[dict], ref: str = REF_DEFAULT, formula: Optional[str] =
     return out
 
 
+# 리비전: 학습 시드 단위 통계, 규칙 기반 비교, 2³ 요인 효과
+
+def metric_value(rec: dict, metric: str) -> float:
+    """eval.csv 행(dict)에서 지표 값. 파생 지표 포함
+
+    J                 : avg_flow_time + COST_DIST · dist_per_order (주문당 흐름시간 + c_d · 주문당 이동거리, s)
+    blocked_per_robot : blocked_time / M (s)
+    decision_rate     : n_decisions / n_totes (큐에서 방출된 토트는 결정 아님)
+    completion_rate   : n_completed / n_arrived
+    그 밖: 같은 이름 열
+    """
+    from constant import COST_DIST
+    f = lambda k: float(rec[k])
+    if metric == "J":
+        return f("avg_flow_time") + COST_DIST * f("dist_per_order")
+    if metric == "blocked_per_robot":
+        return f("blocked_time") / max(1.0, f("num_robots"))
+    if metric == "decision_rate":
+        return f("n_decisions") / max(1.0, f("n_totes"))
+    if metric == "completion_rate":
+        return f("n_completed") / max(1.0, f("n_arrived"))
+    return f(metric)
+
+
+def load_records(root: str) -> List[dict]:
+    """load_results와 같은 탐색 규칙으로 eval.csv 행 전체를 읽음 (지표는 metric_value로 꺼냄)
+
+    출력 행: setting, lam, M, K, policy, run, train_seed, seed, rec (CSV 행 dict)
+    """
+    rows = []
+    for path in sorted(glob.glob(os.path.join(root, "*", "*", "*", "eval.csv"))):
+        run_dir  = os.path.dirname(path)
+        cell_dir = os.path.dirname(run_dir)
+        m = _CELL_RE.match(os.path.basename(cell_dir))
+        if not m or "-" in m["M"]:
+            continue
+        setting, run_name = os.path.basename(os.path.dirname(cell_dir)), os.path.basename(run_dir)
+        with open(path, newline="") as f:
+            for r in csv.DictReader(f):
+                if r.get("seed") in (None, "", "-1"):
+                    continue
+                if r["label"] == "RL":
+                    rm = _RUN_RE.match(run_name)
+                    policy, ts, run = (rm["arm"] + rm["rest"], int(rm["seed"]), run_name) if rm else (run_name, 0, run_name)
+                else:
+                    policy, ts, run = r["label"], 0, r["label"]
+                rows.append({"setting": setting, "lam": float(m["lam"]), "M": int(m["M"]), "K": int(m["K"]),
+                             "policy": policy, "run": run, "train_seed": ts, "seed": int(r["seed"]), "rec": r})
+    keep = {}
+    for r in rows:
+        keep[(r["setting"], r["lam"], r["M"], r["K"], r["run"], r["seed"])] = r
+    return list(keep.values())
+
+
+def with_metric(rows: List[dict], metric: str) -> List[dict]:
+    """load_records 행에 y = metric 값을 붙인 복사본 (paired_matrix 입력 형식)"""
+    return [{**r, "y": metric_value(r["rec"], metric)} for r in rows]
+
+
+def nested_ratio_bootstrap(Y: np.ndarray, R: np.ndarray, B: int, rng: np.random.Generator) -> np.ndarray:
+    """상대 차이 100 · (mean Y / mean R − 1)의 시드→인스턴스 계층 부트스트랩 분포
+
+    Y: (n_train, n_test) 정책 값, R: (n_test,) 기준 값 (같은 테스트 인스턴스)
+    학습 시드를 복원추출한 뒤 시드마다 테스트 인스턴스를 따로 복원추출 (기준도 같은 인스턴스로)
+    """
+    n_t, n_e = Y.shape
+    ti = rng.integers(0, n_t, size=(B, n_t))
+    ei = rng.integers(0, n_e, size=(B, n_t, n_e))
+    num = Y[ti[:, :, None], ei].mean(axis=(1, 2))
+    den = R[ei].mean(axis=(1, 2))
+    return 100.0 * (num / den - 1.0)
+
+
+def seed_level_compare(pol_rows: List[dict], ref_rows: List[dict], B: int = 10000,
+                       rng: Optional[np.random.Generator] = None, alpha: float = 0.05) -> Optional[dict]:
+    """학습 시드 단위 비교 (정책 − 기준, 작을수록 좋음)
+
+    - 시드별 평균 차이 m_i = mean_j (y_ij − ref_j) (공통 테스트 인스턴스), 보고 평균 = mean_i m_i
+    - 95% CI: 시드→인스턴스 계층(nested) 부트스트랩
+    - p: 시드 간 대응 t검정 (m_i의 일표본 t, 자유도 n_seed − 1). 학습 시드가 1개면 인스턴스 간 대응 t검정
+    - n_better: m_i < 0인 시드 수
+    - 상대 차이 ΔF% = 100 (F̄_pol − F̄_ref) / F̄_ref, 시드 단위 CI (nested_ratio_bootstrap)
+    """
+    from scipy import stats as st
+    rng = rng or np.random.default_rng(0)
+    pm = paired_matrix(pol_rows, ref_rows)
+    if pm is None:
+        return None
+    D, ts, es = pm
+    ref = {r["seed"]: r["y"] for r in ref_rows}
+    R = np.array([ref[e] for e in es])
+    Y = D + R[None, :]
+    m_i = D.mean(axis=1)
+    if len(ts) > 1:
+        p = float(st.ttest_1samp(m_i, 0.0).pvalue)
+        test = "seed_t"
+    else:
+        p = float(st.ttest_1samp(D[0], 0.0).pvalue) if len(es) > 1 else float("nan")
+        test = "instance_t"
+    boot = hierarchical_bootstrap(D, B, "nested", rng)
+    rb   = nested_ratio_bootstrap(Y, R, B, rng)
+    return {"n_train": len(ts), "n_test": len(es), "mean_pol": float(Y.mean()), "mean_ref": float(R.mean()),
+            "diff": float(m_i.mean()), "ci_lo": float(np.quantile(boot, alpha / 2)),
+            "ci_hi": float(np.quantile(boot, 1 - alpha / 2)), "p": p, "test": test,
+            "n_better": int(np.sum(m_i < 0)), "seed_diffs": ";".join(f"{x:.3f}" for x in m_i),
+            "rel_pct": float(100.0 * (Y.mean() / R.mean() - 1.0)),
+            "rel_ci_lo": float(np.quantile(rb, alpha / 2)), "rel_ci_hi": float(np.quantile(rb, 1 - alpha / 2))}
+
+
+def rule_compare(pol_rows: List[dict], ref_rows: List[dict], alpha: float = 0.05) -> Optional[dict]:
+    """규칙 기반 정책끼리 비교 (학습 시드 없음): 인스턴스 간 대응 t검정, t 기반 95% CI"""
+    from scipy import stats as st
+    pm = paired_matrix(pol_rows, ref_rows)
+    if pm is None:
+        return None
+    D, _, es = pm
+    d = D[0]
+    ref = {r["seed"]: r["y"] for r in ref_rows}
+    R = np.array([ref[e] for e in es])
+    n = len(d)
+    se = d.std(ddof=1) / math.sqrt(n) if n > 1 else float("nan")
+    tc = st.t.ppf(1 - alpha / 2, max(1, n - 1))
+    # 상대 차이 CI: 델타법 (평균 비율)
+    rel = 100.0 * d.mean() / R.mean()
+    return {"n_train": 1, "n_test": n, "mean_pol": float((d + R).mean()), "mean_ref": float(R.mean()),
+            "diff": float(d.mean()), "ci_lo": float(d.mean() - tc * se), "ci_hi": float(d.mean() + tc * se),
+            "p": float(st.ttest_rel(d + R, R).pvalue) if n > 1 else float("nan"), "test": "instance_t",
+            "n_better": int(d.mean() < 0), "seed_diffs": "",
+            "rel_pct": float(rel), "rel_ci_lo": float(rel - 100.0 * tc * se / R.mean()),
+            "rel_ci_hi": float(rel + 100.0 * tc * se / R.mean())}
+
+
+def holm_table(rows: List[dict], key: str = "p", out_key: str = "p_holm"):
+    """표 하나의 모든 비교(행 × 지표)에 Holm 보정 (in-place)"""
+    for r, ph in zip(rows, holm([r.get(key, float("nan")) for r in rows])):
+        r[out_key] = ph
+    return rows
+
+
+def factorial_effects(obs: List[dict], factors: Sequence[str], alpha: float = 0.05) -> List[dict]:
+    """2^k 요인 설계의 주효과와 2요인 상호작용 (±1 코딩 최소제곱, 학습 시드 = 반복)
+
+    obs: {"y": 값, factor: ±1, ...} 리스트 (예: y = log(F̄_RL,seed / F̄_best))
+    출력 행: term, coef (±1 코딩 계수, 효과 = 2 · coef), se, ci_lo, ci_hi, p, df
+    """
+    from itertools import combinations
+    from scipy import stats as st
+    terms = list(factors) + [f"{a}:{b}" for a, b in combinations(factors, 2)]
+    X = np.array([[1.0] + [o[f] for f in factors] + [o[a] * o[b] for a, b in combinations(factors, 2)]
+                  for o in obs])
+    y = np.array([o["y"] for o in obs])
+    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    df = len(y) - X.shape[1]
+    resid = y - X @ beta
+    s2 = float(resid @ resid / df) if df > 0 else float("nan")
+    cov = s2 * np.linalg.pinv(X.T @ X)
+    tc = st.t.ppf(1 - alpha / 2, df) if df > 0 else float("nan")
+    out = []
+    for i, name in enumerate(["Intercept"] + terms):
+        se = math.sqrt(cov[i, i]) if df > 0 else float("nan")
+        tval = beta[i] / se if se and se > 0 else float("nan")
+        out.append({"term": name, "coef": float(beta[i]), "se": se, "ci_lo": float(beta[i] - tc * se),
+                    "ci_hi": float(beta[i] + tc * se),
+                    "p": float(2 * st.t.sf(abs(tval), df)) if df > 0 and not math.isnan(tval) else float("nan"),
+                    "df": df, "n_obs": len(y)})
+    return out
+
+
 # 출력
 
 def _save(rows: List[dict], path: str):
     if not rows:
         return
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fields = list(dict.fromkeys(k for r in rows for k in r))     # 행마다 열이 달라도 합집합 (첫 행 순서 우선)
     with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         w.writerows(rows)
 

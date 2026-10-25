@@ -18,6 +18,22 @@ arm (보상 모드, 업데이트 비율, 특징 세트):
                      v1: α 상한 없음, 보상 기준점 = 학습 누적 평균, MSE (logs_exp/v1_snapshot)
     local_r8_ddqn_v2: v1 + 보상 기준점 고정 μ(λ) (학습 전 BL6 prior 롤아웃, 셀마다 local_mu.json 공유), α ≤ 1, Huber 손실
     (이전 local_r8_glob은 dueling 구조로 제거됨, 결과 CSV만 남음)
+    리비전 변형 (local_r8_ddqn_v2에서 한 요소만 바꿈, 에이전트/시뮬레이터 인자로 전달)
+      local_r8_ddqn_v2_gamma  : 연속시간 할인 e^(−βτ) 대신 결정당 γ = 0.99, local 비용 유지
+                                (RLSimulator discount="decision", μ(λ)는 기본 local_mu.json 공유)
+      legacy_r8_ddqn_v2       : legacy shaped reward + 결정당 γ (원 논문 방식) + GlobalDQNAgent(α ≤ 1, Huber),
+                                μ(λ) 없음. BL6 prior 척도 1/Z는 그대로 (agents.GlobalDQNAgent 설명)
+
+평가 옵션
+    --route fixed_dock 도킹 순서(복귀 WS)를 트립 출발 시 고정 (RL·베이스라인 공통)
+                       → setting 뒤 _route-fixeddock, RL run 이름에도 같은 꼬리표
+    --log-reconstructions PATH  RL 테스트 중 NNH 경로 구성 호출마다 입력·D(ρ)·호출 시간을 JSONL로 기록
+                       (.gz이면 gzip, 결과 지표는 그대로, experiments/route_gap.py 입력)
+
+--load 시 BL6 prior 척도: 평가 레이아웃의 dist_norm으로 mc_scale을 다시 설정 (기본, 주차장 행 수가 M·K에 따라
+    달라 학습 레이아웃 값이면 prior가 정확히 mc/Z가 아님). --keep-train-mc-scale이면 체크포인트 값 유지.
+    적용 여부와 두 값은 run.json의 mc_scale에 기록
+--load 결과 폴더가 체크포인트의 학습 폴더와 같으면 (같은 셀·조건 재평가) --tag가 필요 (원래 eval.csv 보호)
 
 이어하기: 학습 폴더에 resume.pt를 CKPT_EVERY 에피소드마다 저장. 같은 명령을 다시 실행하면 이어서 학습
     (--fresh이면 무시하고 처음부터). 테스트 평가까지 끝나면 resume.pt 삭제
@@ -56,11 +72,12 @@ from scenario import Scenario
 from agents import DQNAgent, GlobalDQNAgent
 from metrics import MetricsStore, TrainingCurveStore, print_comparison
 from training import train, make_validator, load_or_estimate_local_mu
-from evaluation import POLICIES, evaluate_policy, evaluate_baselines_cached, test_seeds, val_seeds
+from evaluation import (POLICIES, POLICY_ALIASES, Condition, evaluate_policy, evaluate_baselines_cached,
+                        policy_key, test_seeds, val_seeds)
 from constant import (
     GRID_TRAFFIC, GRID_MOTION, SIM_TIME, LAMBDA_DEFAULT, DEFAULT_SEED,
     NUM_ROBOTS, NUM_WORKSTATIONS, ROBOT_CAPACITY, N_EVAL, N_VAL,
-    TOTAL_EPISODES, RL_OUT_DIR,
+    TOTAL_EPISODES, RL_OUT_DIR, ROUTE_MODES,
 )
 
 ARMS = {
@@ -73,6 +90,13 @@ ARMS = {
     "local_r8_ddqn_v2": dict(reward_mode="local", update_ratio=8,   feature_set="bl6", agent="global",
                              mu="bl6", alpha_max=1.0, loss="huber"),
 }
+_V2 = ARMS["local_r8_ddqn_v2"]
+ARMS.update({
+    "local_r8_ddqn_v2_gamma": dict(_V2, discount="decision"),
+    "legacy_r8_ddqn_v2":      dict(reward_mode="legacy", update_ratio=8, feature_set="bl6", agent="global",
+                                   alpha_max=1.0, loss="huber"),
+})
+SIM_KEYS = ("discount",)    # arm 설정 중 RLSimulator 인자 (학습·검증)
 
 
 def summarize(root: str):
@@ -141,8 +165,8 @@ def main():
     p.add_argument("--select", choices=["last", "val"], default="last", help="테스트에 쓸 체크포인트 선택 방식")
     p.add_argument("--val-every", type=int, default=50, help="--select val 검증 주기 (에피소드)")
     p.add_argument("--n-val", type=int, default=N_VAL, help="검증 시드 수")
-    p.add_argument("--baselines", nargs="*", choices=list(POLICIES), default=["BL4", "BL5", "BL6"],
-                   help="함께 평가할 베이스라인 (빈 목록이면 RL만)")
+    p.add_argument("--baselines", nargs="*", choices=list(POLICIES) + list(POLICY_ALIASES),
+                   default=["BL4", "BL5", "BL6"], help="함께 평가할 베이스라인 (빈 목록이면 RL만, BL7 = GR)")
     p.add_argument("--load", default=None, help="학습 없이 평가할 체크포인트 경로")
     p.add_argument("--tag", default=None, help="결과 폴더 이름 뒤에 붙일 꼬리표")
     p.add_argument("--traffic", choices=["free", "lanes"], default=GRID_TRAFFIC)
@@ -154,6 +178,12 @@ def main():
     p.add_argument("--fresh", action="store_true", help="resume.pt가 있어도 무시하고 처음부터 학습")
     p.add_argument("--mu-only", action="store_true",
                    help="arm이 mu=bl6이면 셀의 local_mu.json만 만들고 종료 (병렬 학습 전 1회, stage1이 호출)")
+    p.add_argument("--route", choices=list(ROUTE_MODES), default="nnh",
+                   help="경로 구성 규칙 (nnh / fixed_dock, RL·베이스라인 공통)")
+    p.add_argument("--keep-train-mc-scale", action="store_true",
+                   help="--load 시 BL6 prior 척도를 평가 레이아웃 기준으로 다시 맞추지 않음")
+    p.add_argument("--log-reconstructions", default=None, metavar="PATH",
+                   help="RL 테스트 중 경로 구성 호출을 JSONL로 기록 (.gz이면 gzip, route_gap.py 입력)")
     args = p.parse_args()
 
     if args.summarize:
@@ -164,9 +194,8 @@ def main():
     if args.scenario:
         text = open(args.scenario).read() if os.path.isfile(args.scenario) else args.scenario
         scenario = Scenario(**json.loads(text))
-    setting = f"grid_{args.traffic}_{args.motion}"
-    if not scenario.is_default:
-        setting += "_sc" + hashlib.sha1(json.dumps(scenario.to_dict(), sort_keys=True).encode()).hexdigest()[:6]
+    cond = Condition(traffic=args.traffic, motion=args.motion, route=args.route)
+    setting     = cond.setting(scenario)
     setting_dir = os.path.join(args.out, setting)
     lam = args.lam / 3600.0
 
@@ -200,9 +229,7 @@ def main():
     def layout_for(M: int) -> GridWarehouseLayout:
         """M대용 레이아웃 (주차·대기열 셀 크기가 M에 따라 달라짐, M마다 한 번 생성)"""
         if M not in layouts:
-            layouts[M] = GridWarehouseLayout(seed=DEFAULT_SEED, num_robots=M,
-                                             robot_capacity=ROBOT_CAPACITY, num_workstations=args.ws,
-                                             traffic=args.traffic, motion=args.motion, scenario=scenario)
+            layouts[M] = cond.layout(M, args.ws, scenario)
         return layouts[M]
 
     # max_candidates는 학습/평가 M 중 최댓값 기준
@@ -214,12 +241,14 @@ def main():
                                huber=cfg.get("loss") == "huber", **agent_kw)
     else:
         agent = DQNAgent(**agent_kw)
+    train_sim_kw = {k: cfg[k] for k in SIM_KEYS if k in cfg}
     run_info = {"arm": arm, **cfg, "train_seed": train_seed, "train_robots": train_Ms,
                 "train_lam_hr": train_lam * 3600, "eval_lam_hr": args.lam, "num_workstations": args.ws,
-                "traffic": args.traffic, "motion": args.motion, "scenario": scenario.to_dict(),
+                "traffic": cond.traffic, "motion": cond.motion, "scenario": scenario.to_dict(),
+                "condition": cond.to_dict(), "setting": setting,
                 "sim_time": args.sim_time, "tag": args.tag, "n_eval": args.n_eval, "env": runtime_env()}
     print(f"arm={arm} ({cfg}), λ={args.lam:.0f}/hr, 학습 M={train_Ms}, 평가 M={eval_Ms}, K={args.ws}, "
-          f"{args.traffic}/{args.motion}, 특징 {agent.feat_dim}차원")
+          f"{setting}, 특징 {agent.feat_dim}차원")
     cell_dir = os.path.join(setting_dir, f"lam{args.lam:.0f}_M{spec}_K{args.ws}")
     if args.mu_only:
         if cfg.get("mu") == "bl6":
@@ -245,13 +274,13 @@ def main():
         validate = None
         if args.select == "val":
             validate = make_validator(tr_layouts, agent, lam, val_seeds(args.n_val), args.sim_time,
-                                      cfg["reward_mode"], val_store)
+                                      cfg["reward_mode"], val_store, sim_kw={**train_sim_kw, **cond.sim_kw})
         wall = time.perf_counter()
         best = train(tr_layouts, agent, tr_store, lam=lam, seed=train_seed, total_episodes=args.episodes,
                      sim_time=args.sim_time, label=arm, curve_store=curve,
                      update_ratio=cfg["update_ratio"], reward_mode=cfg["reward_mode"],
                      verbose_every=max(1, args.episodes // 20), validate=validate, val_every=args.val_every,
-                     resume_path=resume_path, val_store=val_store)
+                     resume_path=resume_path, val_store=val_store, sim_kw={**train_sim_kw, **cond.sim_kw})
         train_wall = time.perf_counter() - wall
         if agent.mu_table is not None:
             run_info["local_mu_table"] = {"lam_hr": [l * 3600 for l in agent.mu_table[0]], "mu_s": agent.mu_table[1]}
@@ -270,7 +299,8 @@ def main():
         meta = {"lam": lam, "num_robots": train_Ms[0] if len(train_Ms) == 1 else None,
                 "train_robots": train_Ms, "num_workstations": args.ws, "robot_capacity": ROBOT_CAPACITY,
                 "episodes": args.episodes, "train_seed": train_seed, "arm": arm, **cfg,
-                "traffic": args.traffic, "motion": args.motion, "scenario": scenario.to_dict(),
+                "traffic": cond.traffic, "motion": cond.motion, "scenario": scenario.to_dict(),
+                "condition": cond.to_dict(),
                 "tag": args.tag, "select": args.select, "selected_episode": args.episodes}
         agent.save(os.path.join(train_dir, "agent_last.pt"), meta)
         if best is not None:
@@ -285,6 +315,12 @@ def main():
             json.dump(run_info, f, indent=1, ensure_ascii=False)
 
     seeds = test_seeds(args.n_eval)
+    if args.log_reconstructions:
+        if os.path.isfile(args.log_reconstructions):
+            os.remove(args.log_reconstructions)          # 이번 실행 기록만 남김 (시드별로 덧붙임)
+        run_info["log_reconstructions"] = os.path.abspath(args.log_reconstructions)
+    train_K = ckpt_meta.get("num_workstations", args.ws)   # 전역 상태 차원이 K에 의존하므로 K가 다르면 로드 불가
+    train_mc_scale = getattr(agent, "mc_scale", None)       # GlobalDQNAgent만 (체크포인트/학습 레이아웃 값)
     for M in eval_Ms:
         base_dir = os.path.join(setting_dir, f"lam{args.lam:.0f}_M{M}_K{args.ws}")
         run_name = f"{arm}_s{train_seed}"
@@ -292,12 +328,23 @@ def main():
             run_name += f"_tr{spec}"
         if abs(train_lam - lam) * 3600 > 0.5:
             run_name += f"_trlam{train_lam * 3600:.0f}"
-        run_name += tag_s
+        run_name += cond.tag + tag_s
         out = os.path.join(base_dir, run_name)
+        if args.load and os.path.abspath(out) == os.path.dirname(os.path.abspath(args.load)) and not args.tag:
+            raise SystemExit(f"--load 결과 폴더 {out}가 체크포인트 학습 폴더와 같습니다. --tag를 지정하세요 "
+                             f"(원래 eval.csv 보호)")
         os.makedirs(out, exist_ok=True)
         L = layout_for(M)
+        mc_info = None
+        if train_mc_scale is not None:
+            mc_info = {"train": train_mc_scale, "eval_layout": agent.mc_scale_for(L.dist_norm),
+                       "applied": bool(args.load) and not args.keep_train_mc_scale}
+            if mc_info["applied"]:
+                agent.set_mc_scale(L.dist_norm)
+            mc_info["used"] = agent.mc_scale
         wall  = time.perf_counter()
-        store = evaluate_policy(L, "RL", lam, seeds, args.sim_time, agent=agent, reward_mode=cfg["reward_mode"])
+        store = evaluate_policy(L, "RL", lam, seeds, args.sim_time, agent=agent, reward_mode=cfg["reward_mode"],
+                                sim_kw=cond.sim_kw, log_reconstructions=args.log_reconstructions)
         eval_wall = time.perf_counter() - wall
         store.save_csv(os.path.join(out, "eval.csv"))
         rs = store.records
@@ -308,15 +355,16 @@ def main():
               f"평가 {eval_wall:.0f} s")
         with open(os.path.join(out, "run.json"), "w", encoding="utf-8") as f:
             json.dump({**run_info, "eval_robots": M, "run": run_name, "test_seeds": seeds,
-                       "eval_wall_s": eval_wall, "eval_latency_seed_mean": lat}, f,
+                       "eval_wall_s": eval_wall, "eval_latency_seed_mean": lat, "mc_scale": mc_info,
+                       "train_num_workstations": train_K}, f,
                       indent=1, ensure_ascii=False)
         labels = ["RL"]
         if args.baselines:
             bl = evaluate_baselines_cached(L, args.baselines, lam, seeds, args.sim_time,
-                                           os.path.join(base_dir, "baselines", "eval.csv"))
+                                           os.path.join(base_dir, "baselines", "eval.csv"), sim_kw=cond.sim_kw)
             for r in bl.records:
                 store.add(r)
-            labels += [POLICIES[k][0] for k in args.baselines]
+            labels += [POLICIES[policy_key(k)][0] for k in args.baselines]
         print_comparison(store, labels, lam=lam, num_robots=M, last_n=args.n_eval,
                          title=f"RL ({run_name}) vs baselines")
         print(f"저장: {out}")

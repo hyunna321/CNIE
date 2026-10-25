@@ -15,6 +15,10 @@
       보상 = −(비용 − μ) / scale. 완료 시각을 알아야 하므로 에피소드 종료 후 일괄 계산
       μ: 에이전트에 고정 기준점 μ(λ)가 있으면 그 값 (agent.local_mu, v2), 없으면 학습 누적 평균 (v1)
       (에피소드 끝까지 완료되지 않은 토트는 sim_time까지로 자름)
+할인 방식 (discount 인자): "time"이면 위 규칙, "decision"이면 보상 모드와 무관하게 결정당 γ
+  (arm local_r8_ddqn_v2_gamma: local 비용 그대로, 할인만 결정당 γ)
+기록 통계: n_decisions, avg_candidates, n_qpen_active (대기 큐가 비어 있지 않은 결정 = legacy 큐 압박 항 활성),
+  n_depletion_active (legacy 소진 페널티 활성) — 보상 모드와 무관하게 train.csv / eval.csv에 기록
 
 에이전트가 uses_global(GlobalDQNAgent)이면 결정마다 _global_state()를 set_global로 넘기고,
 전이의 상태/다음 상태로 후보 특징 대신 agent.last_key를 씀
@@ -46,7 +50,8 @@ class RLSimulator(SimulatorBase):
     def __init__(self, layout, agent: DQNAgent, lam: float, seed: int,
                  sim_time: float = SIM_TIME, num_robots: int = NUM_ROBOTS,
                  robot_capacity: int = ROBOT_CAPACITY, eval_mode: bool = False,
-                 reward_mode: str = "smdp", reward_cfg: Optional[Dict] = None):
+                 reward_mode: str = "smdp", reward_cfg: Optional[Dict] = None,
+                 discount: str = "time", **sim_opts):
         """
         입력:
             layout: GridWarehouseLayout
@@ -57,15 +62,20 @@ class RLSimulator(SimulatorBase):
             num_robots: 로봇 수
             robot_capacity: 로봇 용량
             eval_mode: True이면 ε=0으로 실행하고 전이를 수집하지 않음
-            reward_mode: "legacy", "smdp" (모듈 설명 참고)
+            reward_mode: "legacy", "smdp", "local" (모듈 설명 참고)
             reward_cfg: legacy compute_reward 가중치 덮어쓰기용 kwargs
+            discount: 전이 할인 방식. "time" (기본: smdp/local은 e^{−βτ}, legacy는 γ),
+                      "decision" (보상 모드와 무관하게 결정당 γ = GAMMA, arm local_r8_ddqn_v2_gamma)
+            sim_opts: SimulatorBase 추가 인자 (route)
         """
         assert reward_mode in REWARD_MODES, reward_mode
-        super().__init__(layout, lam, seed, sim_time, num_robots, robot_capacity)
+        assert discount in ("time", "decision"), discount
+        super().__init__(layout, lam, seed, sim_time, num_robots, robot_capacity, **sim_opts)
         self.agent       = agent
         self.eval_mode   = eval_mode
         self.reward_mode = reward_mode
         self.reward_cfg  = reward_cfg or {}
+        self.discount    = discount
         self.use_global  = getattr(agent, "uses_global", False)
         self._init_rl_state()
 
@@ -273,10 +283,10 @@ class RLSimulator(SimulatorBase):
         입력:
             t_next: 다음 결정 시각 (s)
         출력:
-            (선택 후보 특징, 보상, 할인 계수 (legacy: γ, smdp: e^{−βτ}))
+            (선택 후보 특징, 보상, 할인 계수 (legacy 또는 discount="decision": γ, 그 밖: e^{−βτ}))
         """
         feat, t_k, r = self._pending
-        if self.reward_mode == "legacy":
+        if self.reward_mode == "legacy" or self.discount == "decision":
             return feat, r, GAMMA
         return feat, r, math.exp(-SMDP_BETA * (t_next - t_k))
 

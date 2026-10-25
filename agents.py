@@ -550,12 +550,16 @@ class GlobalDQNAgent(DQNAgent):
             alpha_max: 잔차 계수 α 상한 (None이면 상한 없음, GlobalScoreNet 참고)
             huber: True이면 Huber 손실 (False: MSE)
             나머지: DQNAgent와 같음
+
+        BL6 prior 척도 mc_scale = dist_norm / v / Z (Z = SMDP_REWARD_SCALE)는 local/smdp 보상 단위에 맞춘 값
+        legacy 보상(결정당 O(1), arm legacy_r8_ddqn_v2)과 함께 써도 그대로 둠 → prior(≈ mc / Z)가 보상 척도보다 작고
+        α f가 그 차이를 흡수해야 함 (척도 차이는 실험 설계상 의도, 원 논문 보상을 바꾸지 않기 위해)
         """
         assert feature_set == "bl6", "GlobalDQNAgent는 bl6 특징(한계비용 열)이 필요합니다"
         super().__init__(robot_capacity, seed=seed, sim_time=sim_time, num_robots=num_robots,
                          num_workstations=num_workstations, feature_set=feature_set)
         self.ctx_dim  = global_ctx_dim(num_workstations)
-        mc_scale      = dist_norm / ROBOT_SPEED / SMDP_REWARD_SCALE
+        mc_scale      = self.mc_scale_for(dist_norm)
         self.huber    = huber
         torch.manual_seed(seed)
         self.policy_net = GlobalScoreNet(self.feat_dim, self.ctx_dim, mc_scale, alpha_max=alpha_max).to(self.device)
@@ -570,6 +574,26 @@ class GlobalDQNAgent(DQNAgent):
         # local 보상의 평균 차감용 누적 (학습 전 기간, mu_table이 없을 때만 기준점으로 사용)
         self.local_cost_sum = 0.0
         self.local_cost_n   = 0
+
+    @staticmethod
+    def mc_scale_for(dist_norm: float) -> float:
+        """레이아웃 dist_norm에서 BL6 prior 척도 (prior = mc_scale · mc / (dist_norm / v) = mc / Z)"""
+        return dist_norm / ROBOT_SPEED / SMDP_REWARD_SCALE
+
+    @property
+    def mc_scale(self) -> float:
+        """현재 policy_net의 BL6 prior 척도"""
+        return float(self.policy_net.mc_scale)
+
+    def set_mc_scale(self, dist_norm: float):
+        """평가 레이아웃의 dist_norm으로 policy/target의 mc_scale을 다시 설정
+
+        mc_scale은 학습 레이아웃 값으로 체크포인트에 저장되지만, 주차장 행 수가 M·K에 따라 달라 평가 레이아웃의
+        dist_norm이 다르면 prior가 정확히 mc / Z가 아님. 학습 레이아웃과 dist_norm이 같으면 같은 값이 들어감
+        """
+        v = self.mc_scale_for(dist_norm)
+        for net in (self.policy_net, self.target_net):
+            net.mc_scale.fill_(v)
 
     def set_global(self, R: np.ndarray, W: np.ndarray):
         """이번 결정의 전역 상태 (RLSimulator._global_state 결과)"""

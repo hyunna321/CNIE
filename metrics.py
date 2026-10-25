@@ -206,6 +206,23 @@ METRIC_DISPLAY = {
     "saving_per_insertion": (True,  "Saving/Insertion (m)"),
 }
 
+# 코드 라벨 -> 논문 표기 (라벨 자체는 바꾸지 않고 비교표/분석 표에서만 사용)
+PAPER_NAMES = {
+    "BL1F_FillBuffer":  "BL1",
+    "BL1_FullBuffer":   "BL1-Spread",
+    "BL2_Partial_k3":   "BL2",
+    "BL3_Random":       "BL3",
+    "BL4_Nearest":      "BL4",
+    "BL5_MinInsertion": "BL5",
+    "BL6_MarginalCost": "BL6",
+    "Greedy_R":         "BL7",
+}
+
+
+def display_name(label: str) -> str:
+    """코드 라벨의 논문 표기 (매핑에 없으면 그대로)"""
+    return PAPER_NAMES.get(label, label)
+
 
 def _get_field(r: EpisodeResult, fname: str) -> float:
     """EpisodeResult의 지표 값 읽기 (property 지표 포함)
@@ -256,7 +273,7 @@ def compare_labels(store: MetricsStore, labels: List[str],
 def print_comparison(store: MetricsStore, labels: List[str],
                      lam: Optional[float] = None,
                      num_robots: Optional[int] = None,
-                     last_n: int = 10, title: str = "Comparison"):
+                     last_n: int = 10, title: str = "Comparison", paper_names: bool = True):
     """정책별 지표 평균을 표로 출력 (지표마다 가장 좋은 값에 * 표시)
 
     입력:
@@ -265,19 +282,21 @@ def print_comparison(store: MetricsStore, labels: List[str],
         lam, num_robots: 필터 조건
         last_n: 정책별로 마지막 n개 결과만 평균
         title: 표 제목
+        paper_names: True이면 열 제목을 논문 표기(PAPER_NAMES)로
     """
     data  = compare_labels(store, labels, lam=lam,
                            num_robots=num_robots, last_n=last_n)
     lam_s = f"  λ={int(lam*3600)}/hr" if lam is not None else ""
     m_s   = f"  M={num_robots}" if num_robots is not None else ""
-    cw    = max(max(len(l) for l in labels), 10) + 2
+    shown = {l: (display_name(l) if paper_names else l) for l in labels}
+    cw    = max(max(len(l) for l in shown.values()), 10) + 2
     hw    = 36
     sep   = "=" * (hw + cw * len(labels) + 12)
 
     print(f"\n{sep}")
     print(f"  {title}{lam_s}{m_s}  [last {last_n} ep]")
     print(sep)
-    hdr = f"  {'Metric':<{hw}}" + "".join(f"{l:>{cw}}" for l in labels)
+    hdr = f"  {'Metric':<{hw}}" + "".join(f"{shown[l]:>{cw}}" for l in labels)
     print(hdr)
     print("  " + "-" * (hw + cw * len(labels) + 10))
 

@@ -66,6 +66,10 @@
 - **운행 중 삽입** (`Robot.reroute`)
   - 현재 목적지는 유지
   - 남은 피킹 셀 + 새 토트 위치로 NNH 다시 구성, 하역할 도킹 셀도 다시 구성
+- **경로 구성 변형** (`--route`, 평가 전용, 기본 `nnh`, `Robot.route_mode`)
+  - `fixed_dock`: 도킹 셀 순서(복귀 WS)를 트립 출발 시 NNH로 정하고 고정, 삽입으로 새 WS가 생기면 맨 뒤에 추가. 피킹 셀은 NNH로 다시 구성. `_insertion_delta`도 같은 규칙. RL·베이스라인 공통
+  - 결과 폴더 `grid_free_reserve_route-fixeddock`, RL run 이름에도 `_route-fixeddock`
+  - exact(전수 열거 최적 경로)는 closed-loop로 쓰지 않음. `--log-reconstructions PATH`로 RL 평가 중 NNH 경로 구성 호출(트립 출발 `start`, 운행 중 재구성 `reroute`)의 입력·D(ρ)·호출 시간을 JSONL로 남기고 `experiments/route_gap.py`가 같은 입력을 `environment.plan_trip_exact`로 풀어 거리 차이(%)와 계산 시간(ms) 비교. 기록해도 시뮬레이션 결과는 같음
 - **도킹 셀 도착**
   - 그 WS로 갈 토트 중 이미 집은 것을 모두 내리고 처리 시간 합만큼 머묾
   - 처리가 끝난 토트로 주문의 모든 토트가 끝나면 주문 완료
@@ -109,6 +113,9 @@
 | BL4 Nearest | 토트 위치에 가장 가까운 로봇 | O |
 | BL5 Min-Insertion | 추가 이동거리 최소 (하역 WS 추가 포함) | O |
 | BL6 Marginal-Cost | (실은 토트 지연 + 새 토트 남은 시간 + c_d · 추가 거리) 최소. 토트 단위 근사, 주문 완료가 마지막 토트에 달린 점은 미반영 | O |
+| BL7 Greedy_R (키 `GR`, 별칭 `BL7`) | legacy 보상 즉시값 최대 | O |
+
+- 논문 표기 (`metrics.PAPER_NAMES`, 라벨은 그대로): `BL1F_FillBuffer` → BL1, `BL1_FullBuffer` → BL1-Spread, `Greedy_R` → BL7
 
 ## 6. RL 배정
 
@@ -147,6 +154,11 @@
     - 시스템 내 주문 수가 비용 → 할인 없이 적분하면 총 주문 흐름시간 + c_d · 총 이동거리
   - 기록되는 reward는 완료 주문 1건당 값
 - **학습**: Double DQN, PER, 3-step, 앞쪽 절반 에피소드는 λ ∈ [0.7λ, λ] 커리큘럼
+- **리비전 arm** (`local_r8_ddqn_v2`에서 한 요소만 바꿈)
+  - `local_r8_ddqn_v2_gamma`: local 비용 그대로, 할인만 결정당 γ = 0.99 (`RLSimulator(discount="decision")`), μ(λ)는 기본 `local_mu.json` 공유
+  - `legacy_r8_ddqn_v2`: legacy 보상 + 결정당 γ + GlobalDQNAgent(α ≤ 1, Huber), μ(λ) 없음. BL6 prior 척도 1/Z는 local 보상 단위 그대로라 legacy 보상 척도와 다름 (α f가 흡수)
+  - 큐 압박/소진 페널티 활성 빈도는 `train.csv`의 `n_qpen_active`, `n_depletion_active` / `n_decisions`
+- **다른 M·K에서 평가** (`run_rl.py --load`): BL6 prior 척도 `mc_scale = dist_norm / v / Z`를 평가 레이아웃의 `dist_norm`으로 다시 설정 (기본, 주차장 행 수가 M·K에 따라 달라짐). `--keep-train-mc-scale`이면 체크포인트 값 유지. 두 값과 적용 여부는 `run.json`의 `mc_scale`. 전역 상태 차원이 K에 의존해 K가 다른 체크포인트는 로드 불가 (K별 네트워크 필요)
 - 뷰어: 정책 "RL (checkpoint)"로 재생, 결정마다 후보 Q값/Δd/BL6 한계비용 표시. 보상 모드는 체크포인트 학습 조건을 따름
 
 ## 7. 실행
@@ -154,6 +166,9 @@
 - `python run.py`: BL1~BL6을 같은 평가 시드로 돌려 비교표 출력, CSV는 `logs/grid_{traffic}_{motion}/`
 - `python run_rl.py --arm {arm}`: RL 학습 후 같은 평가 시드로 RL과 베이스라인 비교, 결과는 `logs_rl/`, `--summarize`로 요약
 - `python -m viewer.server`: 한 번 실행해 재생 (README 참고)
+- 리비전 실험: `python experiments/revision.py <묶음 E1~E3, T1~T6> --out logs_exp` (docstring 참고), 분석 `python experiments/revision_analyze.py --out logs_exp` → `logs_exp/revision_tables/`
+- 기본 동작 동일성 검증: `python experiments/verify_revision.py all` (병합 전 코드 worktree `../revision_base` 필요)
+- 부록 레이아웃 정보: `python experiments/layout_info.py`
 
 ## 8. 알려진 한계와 TODO
 

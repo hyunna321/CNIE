@@ -113,7 +113,7 @@ def train(layouts: Union[Dict[int, object], object], agent: DQNAgent, store: Met
           validate: Optional[Callable[[int], float]] = None,
           val_every: int = 0,
           resume_path: Optional[str] = None, ckpt_every: int = CKPT_EVERY,
-          val_store: Optional[MetricsStore] = None) -> Optional[dict]:
+          val_store: Optional[MetricsStore] = None, sim_kw: Optional[Dict] = None) -> Optional[dict]:
     """RL 에이전트 학습
 
     - 앞쪽 절반 에피소드: λ를 [lam × CURRICULUM_LAM_MARGIN, lam]에서 무작위로 뽑는 커리큘럼
@@ -143,6 +143,7 @@ def train(layouts: Union[Dict[int, object], object], agent: DQNAgent, store: Met
         resume_path: 이어하기 체크포인트 경로 (None이면 저장/이어하기 안 함)
         ckpt_every: 체크포인트 저장 주기 (에피소드)
         val_store: 검증 결과 store (체크포인트에 함께 저장해 이어하기 후에도 val.csv가 이어지도록)
+        sim_kw: RLSimulator 추가 인자 (arm의 discount 등, 없으면 기본)
     출력:
         validate가 있으면 {"episode", "score", "policy_state", "target_state"} (최고 검증 시점), 없으면 None
     """
@@ -153,7 +154,8 @@ def train(layouts: Union[Dict[int, object], object], agent: DQNAgent, store: Met
 
     lam_lo, lam_hi = lam * CURRICULUM_LAM_MARGIN, lam
     sims = {M: RLSimulator(L, agent, lam=lam, seed=seed, sim_time=sim_time,
-                           num_robots=M, robot_capacity=L.robot_capacity, reward_mode=reward_mode)
+                           num_robots=M, robot_capacity=L.robot_capacity, reward_mode=reward_mode,
+                           **(sim_kw or {}))
             for M, L in layouts.items()}
     rng   = random.Random(seed)
     best  = None
@@ -249,16 +251,18 @@ def train(layouts: Union[Dict[int, object], object], agent: DQNAgent, store: Met
 
 def make_validator(layouts: Dict[int, object], agent: DQNAgent, lam: float, seeds: List[int],
                    sim_time: float, reward_mode: str, store: MetricsStore,
-                   metric: str = "avg_flow_time") -> Callable[[int], float]:
+                   metric: str = "avg_flow_time", sim_kw: Optional[Dict] = None) -> Callable[[int], float]:
     """검증 시드로만 평가하는 train(validate=...)용 함수
 
     점수 = 모든 학습 M × 검증 시드의 metric 평균 (작을수록 좋음). 결과는 store에 쌓임 (episode = 학습 에피소드)
+    sim_kw: 시뮬레이터 추가 인자 (train과 같게)
     """
     def validate(ep: int) -> float:
         vals = []
         for M, L in sorted(layouts.items()):
             res = evaluate_policy(L, "RL", lam, seeds, sim_time, label=f"val_ep{ep}", agent=agent,
-                                  reward_mode=reward_mode, track_decisions=False, verbose=False)
+                                  reward_mode=reward_mode, track_decisions=False, verbose=False,
+                                  sim_kw=sim_kw)
             for r in res.records:
                 r.episode = ep
                 store.add(r)
