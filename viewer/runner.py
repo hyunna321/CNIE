@@ -19,6 +19,7 @@ POLICIES = {
     "BL4": "BL4 Nearest",
     "BL5": "BL5 Min-Insertion",
     "BL6": "BL6 Marginal-Cost",
+    "GR":  "Greedy_R (legacy reward)",
     "RL":  "RL (checkpoint)",
 }
 
@@ -77,7 +78,8 @@ def layout_info(L: GridWarehouseLayout) -> dict:
 def run(cfg: Dict) -> dict:
     """뷰어 설정 cfg로 시뮬레이션을 돌리고 지도, 기록, 요약 지표 반환"""
     from baselines import (FullBufferSimulator, PartialSimulator, RandomAssignSimulator,
-                           NearestRobotSimulator, MinInsertionSimulator, MarginalCostSimulator)
+                           NearestRobotSimulator, MinInsertionSimulator, MarginalCostSimulator,
+                           GreedyRewardSimulator)
     t_wall = time.time()
     cfg = {"policy": "BL6", "num_robots": 14, "num_workstations": 3, "robot_capacity": ROBOT_CAPACITY,
            "lam_hr": 320, "sim_time": 3600, "seed": 10000, "traffic": "free", "motion": "reserve",
@@ -98,7 +100,8 @@ def run(cfg: Dict) -> dict:
         sim = _rl_simulator(cfg, L, sc, M, K, cap, warnings, kw)
     else:
         cls = {"BL1": FullBufferSimulator, "BL2": PartialSimulator, "BL3": RandomAssignSimulator,
-               "BL4": NearestRobotSimulator, "BL5": MinInsertionSimulator, "BL6": MarginalCostSimulator}[policy]
+               "BL4": NearestRobotSimulator, "BL5": MinInsertionSimulator, "BL6": MarginalCostSimulator,
+               "GR": GreedyRewardSimulator}[policy]
         sim = cls(L, **kw)
     rec = Recorder()
     sim.recorder = rec
@@ -118,7 +121,7 @@ def run(cfg: Dict) -> dict:
 
 def _rl_simulator(cfg: Dict, L, sc: Scenario, M: int, K: int, cap: int, warnings: List[str], kw: Dict):
     """체크포인트를 불러와 ε = 0 RLSimulator 생성 (보상 모드는 체크포인트 학습 조건을 따름)"""
-    from agents import DQNAgent
+    from agents import DQNAgent, FEATURE_SETS
     from rl_simulator import RLSimulator
     path = cfg.get("checkpoint")
     if not path:
@@ -127,6 +130,8 @@ def _rl_simulator(cfg: Dict, L, sc: Scenario, M: int, K: int, cap: int, warnings
     if info["robot_capacity"] != cap:
         raise ValueError(f"체크포인트 로봇 용량 {info['robot_capacity']} ≠ 설정 {cap} (특징 차원이 달라 불러올 수 없습니다)")
     fs = info.get("feature_set") or "base"
+    if fs not in FEATURE_SETS:
+        raise ValueError(f"지원하지 않는 특징 세트 '{fs}' 체크포인트입니다 (지금 코드: {', '.join(FEATURE_SETS)})")
     agent = DQNAgent(robot_capacity=cap, num_robots=M, num_workstations=K,
                      sim_time=info.get("sim_time") or SIM_TIME, feature_set=fs)
     try:
@@ -134,7 +139,7 @@ def _rl_simulator(cfg: Dict, L, sc: Scenario, M: int, K: int, cap: int, warnings
     except RuntimeError:
         raise ValueError("체크포인트 특징 차원이 지금 코드와 다릅니다 (토트 단위 이식 전 체크포인트일 수 있음)")
     m = info.get("meta") or {}
-    reward_mode = m.get("reward_mode") or ("smdp_w" if fs == "smdp_w" else "smdp")
+    reward_mode = m.get("reward_mode") or "smdp"
     warnings += _ckpt_warnings(m, cfg, sc, M, K)
     return RLSimulator(L, agent, eval_mode=True, reward_mode=reward_mode, **kw)
 
@@ -146,8 +151,9 @@ def _ckpt_warnings(m: dict, cfg: dict, sc: Scenario, M: int, K: int) -> List[str
     out = []
     if (m.get("traffic"), m.get("motion")) != (cfg.get("traffic", "free"), cfg.get("motion", "reserve")):
         out.append(f"학습 이동 규칙 {m.get('traffic')}/{m.get('motion')}과 지금 설정이 다릅니다.")
-    if m.get("num_robots") != M or m.get("num_workstations") != K:
-        out.append(f"학습 조건 M={m.get('num_robots')}, K={m.get('num_workstations')}와 지금 설정이 다릅니다.")
+    train_Ms = m.get("train_robots") or [m.get("num_robots")]
+    if M not in train_Ms or m.get("num_workstations") != K:
+        out.append(f"학습 조건 M={'/'.join(map(str, train_Ms))}, K={m.get('num_workstations')}와 지금 설정이 다릅니다.")
     if m.get("lam") and abs(m["lam"] * 3600 - float(cfg.get("lam_hr", 320))) > 1:
         out.append(f"학습 λ={m['lam'] * 3600:.0f}/hr와 지금 λ가 다릅니다.")
     if m.get("scenario") and m["scenario"] != sc.to_dict():

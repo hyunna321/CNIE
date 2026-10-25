@@ -4,7 +4,7 @@ from __future__ import annotations
 import csv
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Dict, List, Optional
 
 from constant import SIM_TIME
@@ -37,8 +37,26 @@ class EpisodeResult:
     sim_time:               float = SIM_TIME   # s, 시뮬레이션 시간
     reward:                 float = 0.0   # RL: 완료 주문 1건당 누적 보상 (shaping 제외)
     epsilon:                float = 0.0   # RL: 에피소드 종료 시 ε
-    n_wait_action:          int   = 0     # RL: wait를 고른 횟수
-    n_forced_wait:          int   = 0     # RL: 그중 후보가 없어 강제로 대기한 횟수
+    seed:                   int   = -1    # 주문 생성 시드 (평가: 테스트/검증 시드)
+    n_decisions:            int   = 0     # 도착 시 정책이 바로 배정한 토트 수 (RL: 배정 결정 수)
+    bl6_agree:              float = float("nan")   # RL 평가: 선택 로봇이 BL6 argmin과 같은 결정 비율
+    avg_flow_time_censored: float = 0.0   # s, 미완료 주문을 sim_time에서 자른 도착 주문 전체 평균
+    avg_unfinished_age:     float = 0.0   # s, sim_time 시점 미완료 주문의 평균 경과시간
+    n_queued_totes:         int   = 0     # 도착 시 후보가 없어 대기 큐로 간 토트 수 (나중에 결정 없이 FIFO 방출)
+    avg_candidates:         float = 0.0   # RL: 결정당 평균 후보 로봇 수
+    n_qpen_active:          int   = 0     # RL: 결정 시점 대기 큐가 비어 있지 않았던 결정 수 (legacy 큐 압박 항 활성)
+    n_depletion_active:     int   = 0     # RL: 마지막 빈 idle 로봇을 쓴 결정 수 (legacy 소진 페널티 활성)
+    # 실행 시간 (삽입형 정책과 RL만, 버퍼형은 0)
+    decision_ms_mean:       float = 0.0   # ms, 결정 1건 선택 지연 (후보 탐색·detour·특징·추론, 기록기 제외)
+    decision_ms_p95:        float = 0.0
+    decision_full_ms_mean:  float = 0.0   # ms, 선택 + 배정·경로 재계획(예약표) 포함
+    decision_full_ms_p95:   float = 0.0
+    wall_s:                 float = 0.0   # s, 에피소드 1회 실행 시간 (학습이면 업데이트 포함)
+
+    @property
+    def decision_rate(self) -> float:
+        """도착 토트 중 정책이 바로 배정한 비율 (나머지는 대기 큐 경유)"""
+        return self.n_decisions / max(1, self.n_totes)
 
     @property
     def completion_rate(self) -> float:
@@ -74,7 +92,7 @@ class MetricsStore:
         if not self.records:
             return
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        extra  = ["completion_rate", "throughput"]
+        extra  = ["completion_rate", "throughput", "decision_rate"]
         fields = list(vars(self.records[0]).keys()) + extra
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields)
@@ -83,7 +101,20 @@ class MetricsStore:
                 row = vars(r).copy()
                 row["completion_rate"] = r.completion_rate
                 row["throughput"]      = r.throughput
+                row["decision_rate"]   = r.decision_rate
                 w.writerow(row)
+
+    @classmethod
+    def load_csv(cls, path: str) -> "MetricsStore":
+        """save_csv로 저장한 CSV를 다시 읽음 (없는 열은 기본값, 모르는 열은 무시)"""
+        types = {f.name: f.type for f in fields(EpisodeResult)}
+        conv  = {"int": lambda v: int(float(v)), "float": float, "str": str}
+        store = cls()
+        with open(path, newline="") as f:
+            for row in csv.DictReader(f):
+                kw = {k: conv[types[k]](v) for k, v in row.items() if k in types and v != ""}
+                store.add(EpisodeResult(**kw))
+        return store
 
     def filter(self, label: Optional[str] = None,
                lam: Optional[float] = None,
@@ -121,6 +152,16 @@ class TrainingPoint:
     epsilon:       float
     n_completed:   int
     avg_flow_time: float
+    num_robots:    int = 0     # 이 에피소드의 로봇 수 M (다중 M 학습)
+    wall_s:        float = 0.0 # s, 에피소드 전체 실행 시간 (시뮬레이션 + 버퍼 적재 + 업데이트, 검증 제외)
+    sim_s:         float = 0.0 # s, 그중 시뮬레이션 (결정 추론 포함)
+    n_updates:     int = 0     # 이 에피소드의 train_step 호출 수
+    lam:           float = float("nan")   # orders/hr, 이 에피소드의 주문 도착률 (커리큘럼)
+    alpha:         float = float("nan")   # 에피소드 끝 잔차 계수 α (GlobalDQNAgent)
+    q_mean:        float = float("nan")   # 이 에피소드 업데이트들의 평균 Q (배치 평균)
+    td_abs:        float = float("nan")   # 이 에피소드 업데이트들의 평균 |TD 오차|
+    local_mu:      float = float("nan")   # s, local 보상 기준점 μ
+    local_cost:    float = float("nan")   # s, 결정당 평균 국소 비용 (μ와 무관, 보상 추세 대신 제시용)
 
 
 class TrainingCurveStore:
@@ -155,13 +196,32 @@ METRIC_DISPLAY = {
     "throughput":           (True,  "Throughput (orders/s)"),
     "completion_rate":      (True,  "Completion Rate"),
     "avg_flow_time":        (False, "Avg Flow Time (s)"),
+    "avg_flow_time_censored": (False, "Avg Flow Time, censored (s)"),
     "avg_wait_time":        (False, "Avg Wait Time (s)"),
+    "decision_rate":        (True,  "Decision Rate"),
     "dist_per_order":       (False, "Dist/Order (m)"),
     "total_distance":       (False, "Total Distance (m)"),
     "avg_totes_per_trip":   (True,  "Totes/Trip"),
     "mid_trip_rate":        (True,  "Mid-Trip Rate"),
     "saving_per_insertion": (True,  "Saving/Insertion (m)"),
 }
+
+# 코드 라벨 -> 논문 표기 (라벨 자체는 바꾸지 않고 비교표/분석 표에서만 사용)
+PAPER_NAMES = {
+    "BL1F_FillBuffer":  "BL1",
+    "BL1_FullBuffer":   "BL1-Spread",
+    "BL2_Partial_k3":   "BL2",
+    "BL3_Random":       "BL3",
+    "BL4_Nearest":      "BL4",
+    "BL5_MinInsertion": "BL5",
+    "BL6_MarginalCost": "BL6",
+    "Greedy_R":         "BL7",
+}
+
+
+def display_name(label: str) -> str:
+    """코드 라벨의 논문 표기 (매핑에 없으면 그대로)"""
+    return PAPER_NAMES.get(label, label)
 
 
 def _get_field(r: EpisodeResult, fname: str) -> float:
@@ -177,6 +237,8 @@ def _get_field(r: EpisodeResult, fname: str) -> float:
         return r.completion_rate
     if fname == "throughput":
         return r.throughput
+    if fname == "decision_rate":
+        return r.decision_rate
     return getattr(r, fname)
 
 
@@ -211,7 +273,7 @@ def compare_labels(store: MetricsStore, labels: List[str],
 def print_comparison(store: MetricsStore, labels: List[str],
                      lam: Optional[float] = None,
                      num_robots: Optional[int] = None,
-                     last_n: int = 10, title: str = "Comparison"):
+                     last_n: int = 10, title: str = "Comparison", paper_names: bool = True):
     """정책별 지표 평균을 표로 출력 (지표마다 가장 좋은 값에 * 표시)
 
     입력:
@@ -220,19 +282,21 @@ def print_comparison(store: MetricsStore, labels: List[str],
         lam, num_robots: 필터 조건
         last_n: 정책별로 마지막 n개 결과만 평균
         title: 표 제목
+        paper_names: True이면 열 제목을 논문 표기(PAPER_NAMES)로
     """
     data  = compare_labels(store, labels, lam=lam,
                            num_robots=num_robots, last_n=last_n)
     lam_s = f"  λ={int(lam*3600)}/hr" if lam is not None else ""
     m_s   = f"  M={num_robots}" if num_robots is not None else ""
-    cw    = max(max(len(l) for l in labels), 10) + 2
+    shown = {l: (display_name(l) if paper_names else l) for l in labels}
+    cw    = max(max(len(l) for l in shown.values()), 10) + 2
     hw    = 36
     sep   = "=" * (hw + cw * len(labels) + 12)
 
     print(f"\n{sep}")
     print(f"  {title}{lam_s}{m_s}  [last {last_n} ep]")
     print(sep)
-    hdr = f"  {'Metric':<{hw}}" + "".join(f"{l:>{cw}}" for l in labels)
+    hdr = f"  {'Metric':<{hw}}" + "".join(f"{shown[l]:>{cw}}" for l in labels)
     print(hdr)
     print("  " + "-" * (hw + cw * len(labels) + 10))
 

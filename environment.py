@@ -6,9 +6,19 @@
   - 실은 토트마다 가야 할 워크스테이션이 주문 도착 시 정해져 있으므로 하역할 도킹 셀은 정책이 아니라
     실은 토트가 결정 (simulator._needed_docks)
   - NNH는 피킹 위치 방문 순서와, 마지막 피킹 위치에서 출발하는 도킹 셀 방문 순서만 정함
+
+경로 구성 규칙 (Robot.route_mode, 평가 전용 변형, 기본 "nnh")
+  - "nnh"       : 위 규칙 (기본)
+  - "fixed_dock": 도킹 셀 순서(따라서 복귀 WS)를 트립 출발 시 NNH로 정한 뒤 고정, 삽입으로 새 WS가 생기면
+                  맨 뒤에 추가 (피킹 셀은 NNH로 다시 구성)
+exact(전수 열거 최적 경로, plan_trip_exact)는 closed-loop로 쓰지 않고 오프라인 비교용
+  Robot.route_log가 켜져 있으면 경로 구성 호출마다 입력과 NNH 결과 거리·호출 시간을 남기고,
+  experiments/route_gap.py가 같은 입력을 exact로 다시 풂
 """
 from __future__ import annotations
 
+import itertools
+import time
 from collections import deque
 from typing import TYPE_CHECKING, Callable, List, Tuple
 
@@ -72,6 +82,41 @@ def plan_trip(start: Cell, picks: List[Cell], docks: List[Cell],
     return pick_route, dock_route, path_distance(start, pick_route + dock_route, dist_func)
 
 
+def plan_trip_exact(start: Cell, picks: List[Cell], docks: List[Cell],
+                    dist_func: Callable[[Cell, Cell], float]) -> Tuple[List[Cell], List[Cell], float]:
+    """피킹 셀 순열 × 도킹 셀 순열을 모두 열거한 최단 경로 (plan_trip과 같은 입력/출력)
+
+    - 같은 피킹 셀이 중복되면 같은 순열은 한 번만 평가
+    - 도킹 순서의 최적값은 마지막 피킹 셀에만 의존하므로 마지막 셀별로 한 번만 계산
+    - 동률이면 itertools.permutations 순서상 먼저 나온 순열 (결정적)
+    입력/출력: plan_trip 참고 (피킹 ≤ 5, 도킹 ≤ K라 최대 5! + 5 · K! 경로)
+    """
+    dock_best: dict = {}
+
+    def best_docks(last: Cell) -> Tuple[float, List[Cell]]:
+        if last not in dock_best:
+            best = None
+            for perm in itertools.permutations(docks):
+                c = path_distance(last, list(perm), dist_func)
+                if best is None or c < best[0] - 1e-9:
+                    best = (c, list(perm))
+            dock_best[last] = best
+        return dock_best[last]
+
+    best, seen = None, set()
+    for perm in itertools.permutations(picks):
+        if perm in seen:
+            continue
+        seen.add(perm)
+        c = path_distance(start, list(perm), dist_func)
+        if best is not None and c >= best[0] - 1e-9:
+            continue
+        dc, dr = best_docks(perm[-1] if perm else start)
+        if best is None or c + dc < best[0] - 1e-9:
+            best = (c + dc, list(perm), dr)
+    return best[1], best[2], best[0]
+
+
 class Robot:
     """피킹 로봇의 위치, 남은 경로, 적재 슬롯 상태 관리
 
@@ -81,7 +126,7 @@ class Robot:
 
     def __init__(self, robot_id: int, workstation: Cell,
                  layout: GridWarehouseLayout, capacity: int,
-                 workstation_id: int = 0):
+                 workstation_id: int = 0, route_mode: str = "nnh"):
         """
         입력:
             robot_id: 로봇 id
@@ -89,16 +134,26 @@ class Robot:
             layout: GridWarehouseLayout
             capacity: 적재 가능한 토트 수
             workstation_id: 초기 워크스테이션 인덱스
+            route_mode: 경로 구성 규칙 (모듈 설명, 기본 "nnh")
         """
+        self.route_mode     = route_mode
+        # list이면 경로 구성 호출마다 (종류 "start"/"reroute", start, picks, docks, NNH 거리 D(ρ) m, 호출 시간 s) 기록
+        self.route_log      = None
         self.id             = robot_id
-        self.workstation     = workstation
-        self.workstation_id  = workstation_id
+        self.home_workstation    = workstation      # reset 시 되돌릴 초기 워크스테이션
+        self.home_workstation_id = workstation_id
         self.layout          = layout
         self.capacity        = capacity
         self.reset()
 
     def reset(self):
-        """로봇을 워크스테이션에 대기 중인 빈 상태로 되돌림"""
+        """로봇을 초기 워크스테이션에 대기 중인 빈 상태로 되돌림
+
+        workstation은 트립마다 바뀌므로 초기값으로 복원 (안 하면 같은 시뮬레이터로 연속 실행한
+        학습 에피소드가 직전 에피소드 끝의 WS 배정을 물려받음)
+        """
+        self.workstation       = self.home_workstation
+        self.workstation_id    = self.home_workstation_id
         self.pos               = self.workstation
         self.route             = []
         self.drops             = []
@@ -117,7 +172,6 @@ class Robot:
         self.plan              = deque()     # (틱, 셀) 순서의 예약 경로
         self.replan_pending    = False
         self.pending_insert    = []          # 계획 실패로 아직 경로에 넣지 못한 삽입 토트 위치
-
     @property
     def stops(self) -> List[Cell]:
         """current_dest 이후 남은 방문 지점 (피킹 셀 -> 도킹 셀)"""
@@ -134,9 +188,31 @@ class Robot:
     def trip_distance_with(self, picks: List[Cell], docks: List[Cell]) -> float:
         """현재 목적지는 유지하고 그 뒤를 picks, docks로 다시 짤 때의 남은 이동거리 (m)"""
         if self.current_dest is None:
-            return plan_trip(self.pos, picks, docks, self._md)[2]
+            return self._plan(self.pos, picks, docks)[2]
         return self._md(self.pos, self.current_dest) + \
-            plan_trip(self.current_dest, picks, docks, self._md)[2]
+            self._plan(self.current_dest, picks, docks, keep_docks=True)[2]
+
+    def _plan(self, start: Cell, picks: List[Cell], docks: List[Cell],
+              keep_docks: bool = False) -> Tuple[List[Cell], List[Cell], float]:
+        """route_mode에 따른 트립 경로 (plan_trip과 같은 출력)
+
+        keep_docks: 운행 중 재구성이면 True (fixed_dock에서 남은 도킹 순서 유지 + 새 WS는 맨 뒤)
+        """
+        if self.route_mode == "fixed_dock" and keep_docks:
+            pick_route = nearest_neighbor_route(start, picks, self._md)
+            order = [d for d in self.drops if d in docks] + [d for d in docks if d not in self.drops]
+            return pick_route, order, path_distance(start, pick_route + order, self._md)
+        return plan_trip(start, picks, docks, self._md)
+
+    def _logged_plan(self, kind: str, start: Cell, picks: List[Cell], docks: List[Cell],
+                     keep_docks: bool) -> Tuple[List[Cell], List[Cell], float]:
+        """_plan과 같음. route_log가 있으면 입력·결과 거리·호출 시간을 기록 (결과는 기록 여부와 무관)"""
+        if self.route_log is None:
+            return self._plan(start, picks, docks, keep_docks=keep_docks)
+        t0  = time.perf_counter()
+        res = self._plan(start, picks, docks, keep_docks=keep_docks)
+        self.route_log.append((kind, start, list(picks), list(docks), res[2], time.perf_counter() - t0))
+        return res
 
     def arrive_at_node(self) -> bool:
         """현재 목적지 도착 처리 후 다음 목적지 꺼냄 (피킹 셀 먼저, 그다음 도킹 셀)
@@ -156,7 +232,7 @@ class Robot:
             picks: 방문할 피킹 셀
             docks: 하역할 도킹 셀
         """
-        self.route, self.drops, _ = plan_trip(self.pos, picks, docks, self._md)
+        self.route, self.drops, _ = self._logged_plan("start", self.pos, picks, docks, keep_docks=False)
         self._set_final_ws()
         self.idle_slots  = self.capacity - len(picks)
         self.is_idle     = False
@@ -166,7 +242,7 @@ class Robot:
     def reroute(self, picks: List[Cell], docks: List[Cell]):
         """이동 중인 트립의 남은 경로를 picks, docks로 다시 구성 (current_dest는 유지, 슬롯 수는 그대로)"""
         start = self.current_dest if self.current_dest is not None else self.pos
-        self.route, self.drops, _ = plan_trip(start, picks, docks, self._md)
+        self.route, self.drops, _ = self._logged_plan("reroute", start, picks, docks, keep_docks=True)
         self._set_final_ws()
         self.route_version += 1
 

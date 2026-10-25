@@ -20,7 +20,7 @@ from reservation import ReservationTable, plan_leg
 from metrics import EpisodeResult
 from constant import (
     SIM_TIME, ROBOT_SPEED, DEFAULT_SEED, CELL_SIZE,
-    GRID_REPLAN_WAIT, GRID_DETOUR_MAX_EXTRA, GRID_DEADLOCK_TICKS,
+    GRID_REPLAN_WAIT, GRID_DETOUR_MAX_EXTRA, GRID_DEADLOCK_TICKS, ROUTE_MODES,
 )
 
 Cell = Tuple[int, int]
@@ -121,6 +121,7 @@ class OrderManager:
         self.all_orders:          List[Order]  = []
         self.all_totes:           List[Tote]   = []
         self._queue_entry_times:  List[float]  = []
+        self.n_enqueued         = 0             # 도착 시 배정되지 못하고 대기 큐에 들어간 토트 수 (누적)
         self.horizon            = SIM_TIME      # 비정상 도착률 프로파일의 기준 시간 (SimulatorBase가 설정)
         self._seed_streams(seed)
 
@@ -142,6 +143,7 @@ class OrderManager:
         self._tote_cnt = 0
         self.wait_queue          = []
         self._queue_entry_times  = []
+        self.n_enqueued          = 0
         self.all_orders.clear()
         self.all_totes.clear()
         self._seed_streams(seed)
@@ -187,6 +189,7 @@ class OrderManager:
         """
         self.wait_queue.append(tote)
         self._queue_entry_times.append(enqueue_time)
+        self.n_enqueued += 1
 
     def dequeue_up_to(self, n: int) -> List[Tote]:
         """대기 큐 앞에서 FIFO 순서로 최대 n개 꺼내기
@@ -258,6 +261,25 @@ class OrderManager:
         ]
         return sum(flows) / len(flows) if flows else 0.0
 
+    def censored_flow_time(self, t_end: float) -> float:
+        """미완료 주문까지 포함한 평균 체류시간: 미완료 주문은 t_end − 도착 시각으로 자름 (하한 추정)
+
+        avg_flow_time은 완료 주문만 평균하므로 미완료가 많은 과부하 조건에서 오래 걸리는 주문이 빠져 작게 나옴
+
+        입력:
+            t_end: 관측 종료 시각 (s, 보통 sim_time)
+        출력:
+            도착 주문 전체의 평균 (s), 도착 주문이 없으면 0.0
+        """
+        flows = [(o.completion_time if o.completion_time is not None else t_end) - o.arrival_time
+                 for o in self.all_orders]
+        return sum(flows) / len(flows) if flows else 0.0
+
+    def avg_unfinished_age(self, t_end: float) -> float:
+        """t_end 시점 미완료 주문의 평균 경과시간 (s), 미완료 주문이 없으면 0.0"""
+        ages = [t_end - o.arrival_time for o in self.all_orders if o.completion_time is None]
+        return sum(ages) / len(ages) if ages else 0.0
+
     def completed_count(self) -> int:
         """완료된 주문 수"""
         return sum(1 for o in self.all_orders if o.completion_time is not None)
@@ -287,10 +309,14 @@ class SimulatorBase:
       - "reactive": 매 틱 다음 셀이 비어 있으면 이동, 막히면 대기/우회
       - "reserve": 로봇의 경로가 바뀔 때(배정, 삽입, 재출발) 그 로봇의 트립 전체를
         시공간 경로로 계획해 예약표에 올리고, 매 틱 예약대로 이동 (_reserve_plan)
+
+    리비전 평가 옵션 (기본값이면 기존 동작과 같음)
+    - route: 경로 구성 규칙 (environment 모듈 설명, "nnh" / "fixed_dock"). _insertion_delta도 같은 규칙
+    - log_routes(): 로봇의 NNH 경로 구성 호출을 기록 (NNH–exact 오프라인 비교용, 동작에는 영향 없음)
     """
 
     def __init__(self, layout: GridWarehouseLayout, lam: float, seed: int,
-                 sim_time: float, num_robots: int, robot_capacity: int):
+                 sim_time: float, num_robots: int, robot_capacity: int, route: str = "nnh"):
         """
         입력:
             layout: GridWarehouseLayout
@@ -299,7 +325,10 @@ class SimulatorBase:
             sim_time: 시뮬레이션 시간 (s)
             num_robots: 로봇 수
             robot_capacity: 로봇 용량 (토트)
+            route: 경로 구성 규칙 ROUTE_MODES (기본 "nnh")
         """
+        assert route in ROUTE_MODES, route
+        self.route_mode       = route
         self.layout           = layout
         self.lam              = lam
         self.seed             = seed
@@ -336,6 +365,8 @@ class SimulatorBase:
         self._n_plans            = 0
         self._n_plan_fail        = 0
         self._plan_time          = 0.0
+        self._lat_sel:  List[float] = []   # s, 결정별 선택 지연 (후보 탐색 ~ 로봇 선택)
+        self._lat_full: List[float] = []   # s, 결정별 전체 지연 (선택 + 배정·경로 재계획)
 
     def _build_robots(self) -> List[Robot]:
         """로봇 생성 및 워크스테이션에 라운드로빈으로 초기 배치
@@ -349,7 +380,7 @@ class SimulatorBase:
             k = rid % K
             robots.append(Robot(rid, self.layout.workstations[k],
                                 self.layout, self.robot_capacity,
-                                workstation_id=k))
+                                workstation_id=k, route_mode=self.route_mode))
         return robots
 
     def reset(self, seed: int):
@@ -511,6 +542,7 @@ class SimulatorBase:
         """로봇에 토트를 넣을 때 늘어나는 이동거리 (m)
 
         삽입 후 경로 = 현재 목적지 유지 + (남은 피킹 셀 + 새 토트 위치) NNH + (필요 도킹 셀 + 새 토트 WS) NNH
+        (route="fixed_dock"이면 Robot._plan의 같은 규칙: 남은 도킹 순서 유지 + 새 WS는 맨 뒤)
         idle 로봇은 현재 위치에서 출발하는 새 트립 전체 거리
 
         입력:
@@ -546,6 +578,14 @@ class SimulatorBase:
             robot.idle_slots = max(0, robot.idle_slots - 1)
             robot.reroute(robot.route + [tote.loc], self._needed_docks(robot))
             self._mid_trip_count += 1
+
+    def log_routes(self, log: list):
+        """모든 로봇의 경로 구성 호출을 log에 기록 (environment.Robot.route_log 형식)
+
+        reset 후에 호출. 기록만 하므로 시뮬레이션 결과는 바뀌지 않음 (NNH–exact 오프라인 비교용)
+        """
+        for r in self.robots:
+            r.route_log = log
 
     def _complete_trip(self, robot: Robot):
         """트립을 마친 로봇을 idle로 되돌림 (토트는 도킹 셀마다 이미 하역)
@@ -596,6 +636,25 @@ class SimulatorBase:
         robot.assign_trip([t.loc for t in totes], self._needed_docks(robot))
         self._schedule_next(robot)
 
+    def _record_latency(self, t0: float, t_sel: float, t_end: float):
+        """결정 1건의 실행 시간 기록 (time.perf_counter 값)
+
+        입력:
+            t0: 결정 시작 (후보 탐색 전)
+            t_sel: 로봇 선택 완료
+            t_end: 배정과 경로 재계획 완료
+        """
+        self._lat_sel.append(t_sel - t0)
+        self._lat_full.append(t_end - t0)
+
+    @staticmethod
+    def _ms_stats(xs: List[float]) -> Tuple[float, float]:
+        """초 단위 목록의 (평균, 95백분위) ms, 비어 있으면 (0, 0)"""
+        if not xs:
+            return 0.0, 0.0
+        s = sorted(xs)
+        return 1e3 * sum(s) / len(s), 1e3 * s[min(len(s) - 1, int(math.ceil(0.95 * len(s))) - 1)]
+
     def distance_per_completed_order(self) -> float:
         """완료 주문 1건당 총 이동거리 (m). 완료 주문이 없으면 0.0."""
         n = self.order_mgr.completed_count()
@@ -627,6 +686,8 @@ class SimulatorBase:
             EpisodeResult
         """
         om = self.order_mgr
+        sel_mean, sel_p95   = self._ms_stats(self._lat_sel)
+        full_mean, full_p95 = self._ms_stats(self._lat_full)
         return EpisodeResult(
             label                = label,
             episode              = episode,
@@ -635,6 +696,8 @@ class SimulatorBase:
             n_completed          = om.completed_count(),
             n_arrived            = len(om.all_orders),
             avg_flow_time        = om.avg_flow_time(),
+            avg_flow_time_censored = om.censored_flow_time(self.sim_time),
+            avg_unfinished_age   = om.avg_unfinished_age(self.sim_time),
             avg_wait_time        = om.avg_wait_time(),
             dist_per_order       = self.distance_per_completed_order(),
             n_totes              = len(om.all_totes),
@@ -650,6 +713,12 @@ class SimulatorBase:
             n_plan_fail          = self._n_plan_fail,
             plan_time_s          = self._plan_time,
             sim_time             = self.sim_time,
+            n_queued_totes       = om.n_enqueued,
+            n_decisions          = len(om.all_totes) - om.n_enqueued,
+            decision_ms_mean     = sel_mean,
+            decision_ms_p95      = sel_p95,
+            decision_full_ms_mean = full_mean,
+            decision_full_ms_p95 = full_p95,
         )
 
     # 이동 엔진

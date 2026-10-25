@@ -331,8 +331,8 @@ function loadRun(res) {
   const D = TR.decisions || [];
   $("rlBox").hidden = !D.length;
   if (D.length) {
-    const agree = D.filter(d => d.chosen === d.bl6).length, waits = D.filter(d => d.chosen < 0).length;
-    $("rlStats").textContent = `결정 ${D.length}건 (토트 단위) · BL6(한계비용 최소)와 같은 로봇 선택 ${(100 * agree / D.length).toFixed(1)}% · wait ${waits}건`;
+    const agree = D.filter(d => d.chosen === d.bl6).length;
+    $("rlStats").textContent = `결정 ${D.length}건 (토트 단위) · BL6(한계비용 최소)와 같은 로봇 선택 ${(100 * agree / D.length).toFixed(1)}%`;
   }
   draw();
 }
@@ -524,11 +524,10 @@ function renderDecisions(t) {
   while (lo <= hi) { const m = (lo + hi) >> 1; if (D[m].t <= t) { end = m; lo = m + 1; } else hi = m - 1; }
   const rows = [];
   for (let j = end; j >= 0 && j > end - 6; j--) {
-    const d = D[j], same = d.chosen === d.bl6, rl = d.chosen < 0 ? "wait" : `R${d.chosen}`;
-    let tbl = d.cands.map(c => `<tr class="${c.robot === d.chosen ? "sel" : ""}"><td>R${c.robot}${c.idle ? " idle" : ""}</td><td>${c.q}</td><td>${c.dd}</td><td>${c.mc}</td><td>${c.load}</td></tr>`).join("");
-    if (d.wait_q !== null) tbl += `<tr class="${d.chosen < 0 ? "sel" : ""}"><td>wait</td><td>${d.wait_q}</td><td>–</td><td>–</td><td>–</td></tr>`;
+    const d = D[j], same = d.chosen === d.bl6, rl = `R${d.chosen}`;
+    const tbl = d.cands.map(c => `<tr class="${c.robot === d.chosen ? "sel" : ""}"><td>R${c.robot}${c.idle ? " idle" : ""}</td><td>${c.q}</td><td>${c.dd}</td><td>${c.mc}</td><td>${c.load}</td></tr>`).join("");
     rows.push(`<div class="dec" data-t="${d.t}"><div class="hd"><span>${fmtT(d.t)} · 토트 #${d.tote} (주문 #${d.order}) @(${LAY.cells[d.loc]}) → WS${d.ws + 1}</span>` +
-      `<span class="tag ${same ? "ok" : "diff"}">RL ${rl} / BL6 ${d.bl6 < 0 ? "–" : "R" + d.bl6}</span></div>` +
+      `<span class="tag ${same ? "ok" : "diff"}">RL ${rl} / BL6 R${d.bl6}</span></div>` +
       `<table><tr><th>후보</th><th>Q</th><th>Δd m</th><th>한계비용</th><th>배정 토트</th></tr>${tbl}</table></div>`);
   }
   $("decisions").innerHTML = rows.join("") || `<div class="note">아직 결정 없음</div>`;

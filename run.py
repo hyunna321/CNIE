@@ -19,52 +19,31 @@ import os
 from grid import GridWarehouseLayout
 from scenario import Scenario
 from metrics import MetricsStore, print_comparison
-from baselines import (FullBufferSimulator, PartialSimulator, RandomAssignSimulator,
-                       NearestRobotSimulator, MinInsertionSimulator, MarginalCostSimulator)
+from evaluation import POLICIES, evaluate_policy, test_seeds
 from constant import (
     GRID_TRAFFIC, GRID_MOTION, SIM_TIME, LAMBDA_DEFAULT, DEFAULT_SEED,
-    NUM_ROBOTS, NUM_WORKSTATIONS, ROBOT_CAPACITY, PARTIAL_K,
-    N_EVAL, EVAL_SEED_BASE, OUT_DIR,
+    NUM_ROBOTS, NUM_WORKSTATIONS, ROBOT_CAPACITY, N_EVAL, OUT_DIR,
 )
-
-# 정책 키 -> (라벨, 시뮬레이터 클래스)
-POLICIES = {
-    "BL1": ("BL1_FullBuffer",          FullBufferSimulator),
-    "BL2": (f"BL2_Partial_k{PARTIAL_K}", PartialSimulator),
-    "BL3": ("BL3_Random",              RandomAssignSimulator),
-    "BL4": ("BL4_Nearest",             NearestRobotSimulator),
-    "BL5": ("BL5_MinInsertion",        MinInsertionSimulator),
-    "BL6": ("BL6_MarginalCost",        MarginalCostSimulator),
-}
 
 
 def evaluate(layout: GridWarehouseLayout, policies, lam: float, num_robots: int,
              n_eval: int, sim_time: float) -> MetricsStore:
-    """정책마다 평가 시드 EVAL_SEED_BASE + i (i < n_eval)로 한 번씩 실행
+    """정책마다 테스트 시드 EVAL_SEED_BASE + i (i < n_eval)로 한 번씩 실행 (evaluation.evaluate_policy)
 
     입력:
-        layout: GridWarehouseLayout
+        layout: GridWarehouseLayout (num_robots와 같은 M으로 만든 것)
         policies: POLICIES 키 리스트
         lam: 주문 도착률 (orders/s)
-        num_robots: 로봇 수
-        n_eval: 평가 시드 수
+        num_robots: 로봇 수 (layout.num_robots와 같아야 함)
+        n_eval: 테스트 시드 수
         sim_time: 시뮬레이션 시간 (s)
     출력:
         결과가 담긴 MetricsStore
     """
+    assert layout.num_robots == num_robots, (layout.num_robots, num_robots)
     store = MetricsStore()
     for key in policies:
-        label, cls = POLICIES[key]
-        for i in range(n_eval):
-            seed = EVAL_SEED_BASE + i
-            sim = cls(layout, lam=lam, seed=seed, sim_time=sim_time,
-                      num_robots=num_robots, robot_capacity=layout.robot_capacity)
-            sim.reset(seed)
-            sim.run()
-            r = sim.build_result(label, i, lam)
-            store.add(r)
-            print(f"  {label:<18} seed {seed}: flow {r.avg_flow_time:7.1f} s, "
-                  f"완료 {r.n_completed}/{r.n_arrived}, 거리/주문 {r.dist_per_order:5.1f} m")
+        evaluate_policy(layout, key, lam, test_seeds(n_eval), sim_time, store=store)
     return store
 
 
