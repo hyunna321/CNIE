@@ -15,7 +15,7 @@
 | `metrics.py` | 에피소드 지표, CSV 저장, 비교표 |
 | `run.py` | 정책 평가 실행 |
 | `agents.py` | DQN 에이전트, (토트, 후보 로봇) 특징 |
-| `rl_simulator.py` | RL 배정 시뮬레이터 (보상 모드 legacy / smdp / smdp_w) |
+| `rl_simulator.py` | RL 배정 시뮬레이터 (보상 모드 legacy / smdp) |
 | `training.py` | RL 학습 루프, ε = 0 평가 |
 | `run_rl.py` | RL arm 학습/평가 후 베이스라인과 비교, 결과 요약 |
 
@@ -29,9 +29,9 @@ python run.py --policies BL4 BL6 --lam 280 --robots 18 --n-eval 5 --motion react
 ## RL
 
 ```bash
-python run_rl.py                                     # smdpw_r8 arm, 1000 에피소드 학습 후 RL vs BL4~BL6 평가 (torch 필요)
+python run_rl.py                                     # smdp_r8_bl6 arm, 1000 에피소드 학습 후 RL vs BL4~BL6 평가 (torch 필요)
 python run_rl.py --arm smdp_r8_bl6 --episodes 200 --baselines BL6 --n-eval 5
-python run_rl.py --arm smdpw_r8 --load logs_rl/.../agent.pt   # 체크포인트 평가만
+python run_rl.py --arm smdp_r8_bl6 --load logs_rl/.../agent.pt   # 체크포인트 평가만
 python run_rl.py --summarize                         # 설정별 arm/베이스라인 흐름시간, BL6 대비 차이
 ```
 

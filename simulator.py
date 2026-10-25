@@ -121,6 +121,7 @@ class OrderManager:
         self.all_orders:          List[Order]  = []
         self.all_totes:           List[Tote]   = []
         self._queue_entry_times:  List[float]  = []
+        self.n_enqueued         = 0             # 도착 시 배정되지 못하고 대기 큐에 들어간 토트 수 (누적)
         self.horizon            = SIM_TIME      # 비정상 도착률 프로파일의 기준 시간 (SimulatorBase가 설정)
         self._seed_streams(seed)
 
@@ -142,6 +143,7 @@ class OrderManager:
         self._tote_cnt = 0
         self.wait_queue          = []
         self._queue_entry_times  = []
+        self.n_enqueued          = 0
         self.all_orders.clear()
         self.all_totes.clear()
         self._seed_streams(seed)
@@ -187,6 +189,7 @@ class OrderManager:
         """
         self.wait_queue.append(tote)
         self._queue_entry_times.append(enqueue_time)
+        self.n_enqueued += 1
 
     def dequeue_up_to(self, n: int) -> List[Tote]:
         """대기 큐 앞에서 FIFO 순서로 최대 n개 꺼내기
@@ -257,6 +260,25 @@ class OrderManager:
             for o in self.all_orders if o.completion_time is not None
         ]
         return sum(flows) / len(flows) if flows else 0.0
+
+    def censored_flow_time(self, t_end: float) -> float:
+        """미완료 주문까지 포함한 평균 체류시간: 미완료 주문은 t_end − 도착 시각으로 자름 (하한 추정)
+
+        avg_flow_time은 완료 주문만 평균하므로 미완료가 많은 과부하 조건에서 오래 걸리는 주문이 빠져 작게 나옴
+
+        입력:
+            t_end: 관측 종료 시각 (s, 보통 sim_time)
+        출력:
+            도착 주문 전체의 평균 (s), 도착 주문이 없으면 0.0
+        """
+        flows = [(o.completion_time if o.completion_time is not None else t_end) - o.arrival_time
+                 for o in self.all_orders]
+        return sum(flows) / len(flows) if flows else 0.0
+
+    def avg_unfinished_age(self, t_end: float) -> float:
+        """t_end 시점 미완료 주문의 평균 경과시간 (s), 미완료 주문이 없으면 0.0"""
+        ages = [t_end - o.arrival_time for o in self.all_orders if o.completion_time is None]
+        return sum(ages) / len(ages) if ages else 0.0
 
     def completed_count(self) -> int:
         """완료된 주문 수"""
@@ -336,6 +358,8 @@ class SimulatorBase:
         self._n_plans            = 0
         self._n_plan_fail        = 0
         self._plan_time          = 0.0
+        self._lat_sel:  List[float] = []   # s, 결정별 선택 지연 (후보 탐색 ~ 로봇 선택)
+        self._lat_full: List[float] = []   # s, 결정별 전체 지연 (선택 + 배정·경로 재계획)
 
     def _build_robots(self) -> List[Robot]:
         """로봇 생성 및 워크스테이션에 라운드로빈으로 초기 배치
@@ -596,6 +620,25 @@ class SimulatorBase:
         robot.assign_trip([t.loc for t in totes], self._needed_docks(robot))
         self._schedule_next(robot)
 
+    def _record_latency(self, t0: float, t_sel: float, t_end: float):
+        """결정 1건의 실행 시간 기록 (time.perf_counter 값)
+
+        입력:
+            t0: 결정 시작 (후보 탐색 전)
+            t_sel: 로봇 선택 완료
+            t_end: 배정과 경로 재계획 완료
+        """
+        self._lat_sel.append(t_sel - t0)
+        self._lat_full.append(t_end - t0)
+
+    @staticmethod
+    def _ms_stats(xs: List[float]) -> Tuple[float, float]:
+        """초 단위 목록의 (평균, 95백분위) ms, 비어 있으면 (0, 0)"""
+        if not xs:
+            return 0.0, 0.0
+        s = sorted(xs)
+        return 1e3 * sum(s) / len(s), 1e3 * s[min(len(s) - 1, int(math.ceil(0.95 * len(s))) - 1)]
+
     def distance_per_completed_order(self) -> float:
         """완료 주문 1건당 총 이동거리 (m). 완료 주문이 없으면 0.0."""
         n = self.order_mgr.completed_count()
@@ -627,6 +670,8 @@ class SimulatorBase:
             EpisodeResult
         """
         om = self.order_mgr
+        sel_mean, sel_p95   = self._ms_stats(self._lat_sel)
+        full_mean, full_p95 = self._ms_stats(self._lat_full)
         return EpisodeResult(
             label                = label,
             episode              = episode,
@@ -635,6 +680,8 @@ class SimulatorBase:
             n_completed          = om.completed_count(),
             n_arrived            = len(om.all_orders),
             avg_flow_time        = om.avg_flow_time(),
+            avg_flow_time_censored = om.censored_flow_time(self.sim_time),
+            avg_unfinished_age   = om.avg_unfinished_age(self.sim_time),
             avg_wait_time        = om.avg_wait_time(),
             dist_per_order       = self.distance_per_completed_order(),
             n_totes              = len(om.all_totes),
@@ -650,6 +697,12 @@ class SimulatorBase:
             n_plan_fail          = self._n_plan_fail,
             plan_time_s          = self._plan_time,
             sim_time             = self.sim_time,
+            n_queued_totes       = om.n_enqueued,
+            n_decisions          = len(om.all_totes) - om.n_enqueued,
+            decision_ms_mean     = sel_mean,
+            decision_ms_p95      = sel_p95,
+            decision_full_ms_mean = full_mean,
+            decision_full_ms_p95 = full_p95,
         )
 
     # 이동 엔진

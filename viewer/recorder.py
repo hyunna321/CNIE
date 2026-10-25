@@ -33,6 +33,7 @@ class Recorder:
         self.plan_ev:  List[list] = []       # [시작 틱, 로봇, [셀 인덱스...]]
         self.assigned: Dict[int, int] = {}  # 토트 id -> 로봇
         self.decisions: List[dict] = []
+        self.agreement = DecisionStats()
         self.metrics = {k: array("f") for k in
                         ("t", "in_system", "queue", "busy", "waiting", "completed", "avg_flow")}
         self.occ  = np.zeros(len(L.cells), dtype=np.int32)
@@ -59,24 +60,22 @@ class Recorder:
         self.plan_ev.append([t0, r.id, list(cells)])
 
     def on_rl_decision(self, sim, tote, eligible, cand_feats, idx, deltas):
-        """RL 결정 1건: 후보별 Q값, 삽입 detour, BL6 한계비용, wait 행 Q값, 선택 (wait면 chosen = -1)"""
+        """RL 결정 1건: 후보별 Q값, 삽입 detour, BL6 한계비용, 선택한 로봇"""
+        self.agreement.on_rl_decision(sim, tote, eligible, cand_feats, idx, deltas)
         if not self.record_decisions:
             return
         import torch
-        from baselines import MarginalCostSimulator
         with torch.no_grad():
             q = sim.agent.policy_net(torch.tensor(cand_feats)).numpy().reshape(-1)
-        mc = [MarginalCostSimulator._marginal_cost(sim, r, tote) for r in eligible]
-        n  = len(eligible)
+        mc = self.agreement.last_mc
         self.decisions.append({
             "t": round(sim.now, 2), "tote": tote.tote_id, "order": tote.order.order_id,
             "loc": sim.layout.cell_index[tote.loc], "ws": tote.ws_id,
             "cands": [{"robot": r.id, "q": round(float(q[i]), 4), "dd": round(deltas[i], 1),
                        "mc": round(mc[i], 1), "idle": bool(r.is_idle), "load": len(sim._robot_totes[r.id])}
                       for i, r in enumerate(eligible)],
-            "wait_q": round(float(q[n]), 4) if len(q) > n else None,
-            "chosen": eligible[idx].id if idx < n else -1,
-            "bl6": eligible[int(np.argmin(mc))].id if eligible else -1,
+            "chosen": eligible[idx].id,
+            "bl6": eligible[int(np.argmin(mc))].id,
             "queue": sim.order_mgr.queue_size(),
         })
 
@@ -149,5 +148,60 @@ class Recorder:
             "metrics": {k: [None if (isinstance(x, float) and x != x) else round(x, 2) for x in v]
                         for k, v in self.metrics.items()},
             "heat_occ": self.occ.tolist(), "heat_wait": self.wait.tolist(),
-            "state_names": STATE_NAMES,
+            "state_names": STATE_NAMES, "bl6_agreement": self.agreement.summary(),
+        }
+
+
+class DecisionStats:
+    """RL 결정과 BL6 argmin(한계비용 최소 후보)의 일치율만 집계하는 가벼운 기록기
+
+    SimulatorBase.recorder에 붙이면 on_reset / on_tick / on_plan은 무시하고 on_rl_decision만 집계
+    동률(한계비용 차 < tie_tol)인 후보를 골라도 일치로 셈
+    """
+
+    def __init__(self, tie_tol: float = 1e-6):
+        self.tie_tol = tie_tol
+        self._clear()
+
+    def _clear(self):
+        self.n = self.agree = 0
+        self.n_idle = self.agree_idle = 0      # BL6 argmin이 idle 로봇인 결정
+        self.regret = 0.0                       # Σ (선택 후보 한계비용 − 최소 한계비용), tote·s
+        self.n_cands = 0
+        self.last_mc: List[float] = []
+
+    def on_reset(self, sim):
+        self._clear()
+
+    def on_tick(self, sim, k: int):
+        pass
+
+    def on_plan(self, sim, r, t0: int, cells):
+        pass
+
+    def on_rl_decision(self, sim, tote, eligible, cand_feats, idx, deltas):
+        from baselines import bl6_marginal_cost
+        mc  = [bl6_marginal_cost(sim, r, d) for r, d in zip(eligible, deltas)]
+        lo  = min(mc)
+        hit = mc[idx] - lo < self.tie_tol
+        self.last_mc  = mc
+        self.n       += 1
+        self.agree   += hit
+        self.regret  += mc[idx] - lo
+        self.n_cands += len(eligible)
+        if eligible[int(np.argmin(mc))].is_idle:
+            self.n_idle     += 1
+            self.agree_idle += hit
+
+    def summary(self) -> dict:
+        """결정 수, 일치율 (전체 / BL6 argmin이 idle·mid-trip인 결정), 결정당 평균 regret, 평균 후보 수"""
+        nan = float("nan")
+        n_mid = self.n - self.n_idle
+        return {
+            "n_decisions": self.n,
+            "agree":       self.agree / self.n if self.n else nan,
+            "agree_idle":  self.agree_idle / self.n_idle if self.n_idle else nan,
+            "agree_mid":   (self.agree - self.agree_idle) / n_mid if n_mid else nan,
+            "regret_mc":   self.regret / self.n if self.n else nan,
+            "avg_cands":   self.n_cands / self.n if self.n else nan,
         }

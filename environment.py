@@ -91,14 +91,20 @@ class Robot:
             workstation_id: 초기 워크스테이션 인덱스
         """
         self.id             = robot_id
-        self.workstation     = workstation
-        self.workstation_id  = workstation_id
+        self.home_workstation    = workstation      # reset 시 되돌릴 초기 워크스테이션
+        self.home_workstation_id = workstation_id
         self.layout          = layout
         self.capacity        = capacity
         self.reset()
 
     def reset(self):
-        """로봇을 워크스테이션에 대기 중인 빈 상태로 되돌림"""
+        """로봇을 초기 워크스테이션에 대기 중인 빈 상태로 되돌림
+
+        workstation은 트립마다 바뀌므로 초기값으로 복원 (안 하면 같은 시뮬레이터로 연속 실행한
+        학습 에피소드가 직전 에피소드 끝의 WS 배정을 물려받음)
+        """
+        self.workstation       = self.home_workstation
+        self.workstation_id    = self.home_workstation_id
         self.pos               = self.workstation
         self.route             = []
         self.drops             = []
