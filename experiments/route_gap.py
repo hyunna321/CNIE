@@ -6,11 +6,13 @@
 처리: 같은 입력(시작 노드 고정)에서 피킹 셀 순열(≤ 5!, 같은 셀 중복은 순열 중복 제거) × 도킹 셀 순열(≤ K!)을
       모두 열거해 D(ρ) = d(start, ρ_1) + Σ d(ρ_i, ρ_{i+1}) (피킹 → 도킹, 논문 Eq. routedist) 최소값과 계산 시간
       (environment.plan_trip_exact). 거리 차이 = (D_NNH − D_exact) / D_exact (%)
-      ms_nnh는 시뮬레이션 중 잰 값, ms_exact는 이 스크립트에서 잰 값 (같은 PC에서 비교할 것)
+      계산 시간: 같은 입력에서 NNH(plan_trip)와 exact를 이 스크립트 안에서 각각 --repeat번 실행한 호출당 평균
+      (호출마다 측정 순서를 번갈아 바꿈, 같은 프로세스·같은 조건). NNH 재계산 거리가 기록과 같은지 확인
+      ms_nnh_sim = 시뮬레이션 중 잰 NNH 시간 (참고용, 다른 부하 조건이라 exact와 직접 비교하지 않음)
       closed-loop 결과에는 영향 없음 (기록 입력은 NNH로 굴러간 궤적의 것)
 출력: --out 접두어로 _calls.csv (호출별), _summary.csv (파일 × 종류 × 피킹 수, 그리고 전체)
       요약 열: n_calls, n_calls_logged, gap_pct_mean/p95, gap_pct_total (거리 합 기준), frac_nnh_optimal,
-              ms_nnh_mean/p95, ms_exact_mean/p95
+              ms_nnh_mean/p95, ms_exact_mean/p95 (같은 조건 측정), ms_nnh_sim_mean/p95 (시뮬레이션 중)
 
 사용법:
     python experiments/route_gap.py logs_exp/.../recon_s1.jsonl.gz ... --M 14 --K 3 --out logs_exp/.../tab_routing_gap
@@ -55,7 +57,17 @@ def _summ(rows, **key):
             "frac_nnh_optimal": sum(x < 1e-9 for x in g) / len(g),
             "ms_nnh_mean": sum(r["ms_nnh"] for r in rows) / len(rows), "ms_nnh_p95": _q([r["ms_nnh"] for r in rows], 0.95),
             "ms_exact_mean": sum(r["ms_exact"] for r in rows) / len(rows),
-            "ms_exact_p95": _q([r["ms_exact"] for r in rows], 0.95)}
+            "ms_exact_p95": _q([r["ms_exact"] for r in rows], 0.95),
+            "ms_nnh_sim_mean": sum(r["ms_nnh_sim"] for r in rows) / len(rows),
+            "ms_nnh_sim_p95": _q([r["ms_nnh_sim"] for r in rows], 0.95)}
+
+
+def _timed(fn, repeat: int):
+    """fn()을 repeat번 실행한 호출당 평균 시간 (ms)과 결과"""
+    t0 = time.perf_counter()
+    for _ in range(repeat):
+        res = fn()
+    return res, 1e3 * (time.perf_counter() - t0) / repeat
 
 
 def main():
@@ -68,11 +80,12 @@ def main():
     p.add_argument("--max-calls", type=int, default=0, help="파일당 무작위 표본 수 (0이면 전부)")
     p.add_argument("--kinds", nargs="*", default=["start", "reroute"], help="포함할 호출 종류")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--repeat", type=int, default=5, help="호출마다 NNH·exact를 각각 반복 실행해 평균 시간 측정")
     p.add_argument("--out", required=True, help="출력 접두어 (_calls.csv, _summary.csv)")
     args = p.parse_args()
 
     from evaluation import Condition
-    from environment import plan_trip_exact
+    from environment import plan_trip, plan_trip_exact
     L = Condition(traffic=args.traffic, motion=args.motion).layout(args.M, args.K)
     d = L.aisle_distance
     rng = random.Random(args.seed)
@@ -83,24 +96,33 @@ def main():
         if args.max_calls and n_logged > args.max_calls:
             recs = rng.sample(recs, args.max_calls)
         rows = []
-        for r in recs:
+        for n, r in enumerate(recs):
             start = tuple(r["start"])
             picks = [tuple(c) for c in r["picks"]]
             docks = [tuple(c) for c in r["docks"]]
-            t0 = time.perf_counter()
-            ex = plan_trip_exact(start, picks, docks, d)[2]
-            ms = 1e3 * (time.perf_counter() - t0)
-            if ex > r["dist_nnh"] + 1e-6:
+            run_nnh = lambda: plan_trip(start, picks, docks, d)[2]
+            run_ex  = lambda: plan_trip_exact(start, picks, docks, d)[2]
+            # 같은 프로세스·같은 입력에서 둘 다 측정, 순서 효과를 없애려고 호출마다 측정 순서를 번갈아 바꿈
+            if n % 2 == 0:
+                nnh, ms_n = _timed(run_nnh, args.repeat)
+                ex, ms_e = _timed(run_ex, args.repeat)
+            else:
+                ex, ms_e = _timed(run_ex, args.repeat)
+                nnh, ms_n = _timed(run_nnh, args.repeat)
+            if abs(nnh - r["dist_nnh"]) > 1e-6:
+                raise RuntimeError(f"NNH 재계산 거리가 기록과 다름: {path} {r} ({nnh})")
+            if ex > nnh + 1e-6:
                 raise RuntimeError(f"exact가 NNH보다 김: {path} {r}")
             rows.append({"file": os.path.basename(path), "seed": r["seed"], "i": r["i"], "kind": r["kind"],
-                         "n_picks": len(picks), "n_docks": len(docks), "dist_nnh": r["dist_nnh"], "dist_exact": ex,
-                         "gap_pct": 100.0 * (r["dist_nnh"] - ex) / ex if ex > 0 else 0.0,
-                         "ms_nnh": r["ms_nnh"], "ms_exact": ms})
+                         "n_picks": len(picks), "n_docks": len(docks), "dist_nnh": nnh, "dist_exact": ex,
+                         "gap_pct": 100.0 * (nnh - ex) / ex if ex > 0 else 0.0,
+                         "ms_nnh": ms_n, "ms_exact": ms_e, "ms_nnh_sim": r["ms_nnh"]})
         calls += rows
         groups = defaultdict(list)
         for r in rows:
             groups[(r["kind"], r["n_picks"])].append(r)
             groups[(r["kind"], "all")].append(r)
+            groups[("all", "all")].append(r)
         for (kind, npk), rs in sorted(groups.items(), key=lambda kv: (kv[0][0], str(kv[0][1]))):
             summ.append(_summ(rs, file=os.path.basename(path), kind=kind, n_picks=npk, n_calls_logged=n_logged))
         print(f"{path}: 기록 {n_logged}개 중 {len(rows)}개 비교")
@@ -111,7 +133,7 @@ def main():
         print(f"  {kind:8s} n={s['n_calls']:7d}  거리 차이 평균 {s['gap_pct_mean']:.2f}% (p95 {s['gap_pct_p95']:.2f}%, "
               f"합계 {s['gap_pct_total']:.2f}%, NNH 최적 {s['frac_nnh_optimal']:.1%})  "
               f"시간 NNH {s['ms_nnh_mean']:.3f} ms (p95 {s['ms_nnh_p95']:.3f}) vs exact {s['ms_exact_mean']:.3f} ms "
-              f"(p95 {s['ms_exact_p95']:.3f})")
+              f"(p95 {s['ms_exact_p95']:.3f}) [같은 조건]  시뮬레이션 중 NNH {s['ms_nnh_sim_mean']:.3f} ms")
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     for suffix, rows in (("_calls.csv", calls), ("_summary.csv", summ)):
         with open(args.out + suffix, "w", newline="", encoding="utf-8") as f:
