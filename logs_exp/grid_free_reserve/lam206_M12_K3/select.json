@@ -1,0 +1,55 @@
+{
+ "best_key": "BL6",
+ "best_label": "BL6_MarginalCost",
+ "val_seeds": [
+  20000,
+  20001,
+  20002,
+  20003,
+  20004,
+  20005,
+  20006,
+  20007,
+  20008,
+  20009
+ ],
+ "sim_time": 36000,
+ "ranking": [
+  {
+   "key": "BL6",
+   "label": "BL6_MarginalCost",
+   "n": 10,
+   "avg_flow_time": 175.46183288760417,
+   "completion_rate": 0.9955441925064982
+  },
+  {
+   "key": "BL7",
+   "label": "Greedy_R",
+   "n": 10,
+   "avg_flow_time": 219.0135365419745,
+   "completion_rate": 0.9942392454457011
+  },
+  {
+   "key": "BL4",
+   "label": "BL4_Nearest",
+   "n": 10,
+   "avg_flow_time": 237.91926180859815,
+   "completion_rate": 0.9938917938432681
+  },
+  {
+   "key": "BL5",
+   "label": "BL5_MinInsertion",
+   "n": 10,
+   "avg_flow_time": 257.11600785114126,
+   "completion_rate": 0.9931109171011034
+  }
+ ],
+ "cell": {
+  "lam": 206,
+  "M": 12,
+  "K": 3,
+  "route": "nnh",
+  "traffic": "free",
+  "motion": "reserve"
+ }
+}
