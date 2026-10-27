@@ -1,0 +1,101 @@
+arm=local_r8_ddqn_v2 ({'reward_mode': 'local', 'update_ratio': 8, 'feature_set': 'bl6', 'agent': 'global', 'mu': 'bl6', 'alpha_max': 1.0, 'loss': 'huber'}), λ=320/hr, 학습 M=[14], 평가 M=[14], K=4, grid_free_reserve, 특징 27차원
+학습 결과 C:\COIS\CNIE_rev\logs_exp\grid_free_reserve\lam320_M14_K4\local_r8_ddqn_v2_s1
+local 보상 기준점 μ(λ): C:\COIS\CNIE_rev\logs_exp\grid_free_reserve\lam320_M14_K4\local_mu.json 사용
+  [Ep   50] local_r8_ddqn_v2  M=14  λ= 288/hr  완료= 2879  flow= 197.2s  totes/trip=2.89  reward/order=-0.0245  ε=0.050  loss=0.3492  α=0.137
+  [Val   50] local_r8_ddqn_v2  score=253.49  *best
+  [Ep  100] local_r8_ddqn_v2  M=14  λ= 265/hr  완료= 2615  flow= 186.9s  totes/trip=2.60  reward/order=-0.0374  ε=0.050  loss=0.4967  α=0.154
+  [Val  100] local_r8_ddqn_v2  score=256.62
+  [Ep  150] local_r8_ddqn_v2  M=14  λ= 302/hr  완료= 3038  flow= 206.8s  totes/trip=3.43  reward/order=0.0256  ε=0.050  loss=0.2631  α=0.168
+  [Val  150] local_r8_ddqn_v2  score=272.49
+  [Ep  200] local_r8_ddqn_v2  M=14  λ= 272/hr  완료= 2771  flow= 215.3s  totes/trip=3.19  reward/order=-0.1607  ε=0.050  loss=0.1809  α=0.177
+  [Val  200] local_r8_ddqn_v2  score=271.58
+  [Ep  250] local_r8_ddqn_v2  M=14  λ= 250/hr  완료= 2449  flow= 172.2s  totes/trip=2.30  reward/order=-0.0085  ε=0.050  loss=0.1357  α=0.184
+  [Val  250] local_r8_ddqn_v2  score=256.29
+  [Ep  300] local_r8_ddqn_v2  M=14  λ= 276/hr  완료= 2780  flow= 190.9s  totes/trip=2.73  reward/order=-0.0223  ε=0.050  loss=0.0726  α=0.225
+  [Val  300] local_r8_ddqn_v2  score=253.84
+  [Ep  350] local_r8_ddqn_v2  M=14  λ= 227/hr  완료= 2259  flow= 169.0s  totes/trip=2.21  reward/order=-0.0157  ε=0.050  loss=0.2043  α=0.250
+  [Val  350] local_r8_ddqn_v2  score=256.75
+  [Ep  400] local_r8_ddqn_v2  M=14  λ= 278/hr  완료= 2725  flow= 194.3s  totes/trip=2.92  reward/order=-0.0440  ε=0.050  loss=0.0571  α=0.260
+  [Val  400] local_r8_ddqn_v2  score=267.25
+  [Ep  450] local_r8_ddqn_v2  M=14  λ= 261/hr  완료= 2554  flow= 177.9s  totes/trip=2.65  reward/order=-0.0038  ε=0.050  loss=0.0965  α=0.287
+  [Val  450] local_r8_ddqn_v2  score=254.12
+  [Ep  500] local_r8_ddqn_v2  M=14  λ= 254/hr  완료= 2589  flow= 183.1s  totes/trip=2.56  reward/order=-0.0349  ε=0.050  loss=0.0847  α=0.295
+  [Val  500] local_r8_ddqn_v2  score=257.54
+  [Ep  550] local_r8_ddqn_v2  M=14  λ= 320/hr  완료= 3063  flow= 221.5s  totes/trip=3.59  reward/order=0.0927  ε=0.050  loss=0.3428  α=0.323
+  [Val  550] local_r8_ddqn_v2  score=253.99
+  [Ep  600] local_r8_ddqn_v2  M=14  λ= 320/hr  완료= 3107  flow= 287.0s  totes/trip=3.76  reward/order=-0.2259  ε=0.050  loss=0.4209  α=0.359
+  [Val  600] local_r8_ddqn_v2  score=262.55
+  [Ep  650] local_r8_ddqn_v2  M=14  λ= 320/hr  완료= 3129  flow= 238.6s  totes/trip=3.83  reward/order=-0.0402  ε=0.050  loss=0.4468  α=0.348
+  [Val  650] local_r8_ddqn_v2  score=261.20
+14], K=4, grid_free_reserve, 특징 27차원
+학습 결과 C:\COIS\CNIE_rev\logs_exp\grid_free_reserve\lam320_M14_K4\local_r8_ddqn_v2_s1
+  이어하기: C:\COIS\CNIE_rev\logs_exp\grid_free_reserve\lam320_M14_K4\local_r8_ddqn_v2_s1\resume.pt (에피소드 600까지 완료, 601부터)
+arm=local_r8_ddqn_v2 ({'reward_mode': 'local', 'update_ratio': 8, 'feature_set': 'bl6', 'agent': 'global', 'mu': 'bl6', 'alpha_max': 1.0, 'loss': 'huber'}), λ=320/hr, 학습 M=[14], 평가 M=[14], K=4, grid_free_reserve, 특징 27차원
+학습 결과 C:\COIS\CNIE_rev\logs_exp\grid_free_reserve\lam320_M14_K4\local_r8_ddqn_v2_s1
+  이어하기: C:\COIS\CNIE_rev\logs_exp\grid_free_reserve\lam320_M14_K4\local_r8_ddqn_v2_s1\resume.pt (에피소드 650까지 완료, 651부터)
+  [Ep  700] local_r8_ddqn_v2  M=14  λ= 320/hr  완료= 3254  flow= 249.3s  totes/trip=4.02  reward/order=-0.0969  ε=0.050  loss=0.2447  α=0.330
+  [Val  700] local_r8_ddqn_v2  score=249.53  *best
+  [Ep  750] local_r8_ddqn_v2  M=14  λ= 320/hr  완료= 3218  flow= 245.4s  totes/trip=3.83  reward/order=-0.0612  ε=0.050  loss=0.2957  α=0.330
+  [Val  750] local_r8_ddqn_v2  score=258.58
+  [Ep  800] local_r8_ddqn_v2  M=14  λ= 320/hr  완료= 3218  flow= 251.5s  totes/trip=3.79  reward/order=-0.0862  ε=0.050  loss=0.1417  α=0.320
+  [Val  800] local_r8_ddqn_v2  score=251.91
+  [Ep  850] local_r8_ddqn_v2  M=14  λ= 320/hr  완료= 3059  flow= 264.6s  totes/trip=3.93  reward/order=-0.1679  ε=0.050  loss=0.1418  α=0.306
+  [Val  850] local_r8_ddqn_v2  score=249.48  *best
+  [Ep  900] local_r8_ddqn_v2  M=14  λ= 320/hr  완료= 3278  flow= 275.3s  totes/trip=4.10  reward/order=-0.2602  ε=0.050  loss=0.1587  α=0.302
+  [Val  900] local_r8_ddqn_v2  score=259.00
+  [Ep  950] local_r8_ddqn_v2  M=14  λ= 320/hr  완료= 3146  flow= 216.8s  totes/trip=3.60  reward/order=0.1173  ε=0.050  loss=0.0447  α=0.303
+  [Val  950] local_r8_ddqn_v2  score=250.78
+  [Ep 1000] local_r8_ddqn_v2  M=14  λ= 320/hr  완료= 3201  flow= 229.7s  totes/trip=3.84  reward/order=0.0356  ε=0.050  loss=0.0979  α=0.295
+  [Val 1000] local_r8_ddqn_v2  score=250.16
+학습 시간 5.31 h (에피소드당 54.3 s, 검증 포함 총계)
+검증 선택: 에피소드 850 (검증 평균 흐름시간 249.5 s)
+  RL                 M=14 seed 10000: flow   263.1 s, 완료 3155/3163, 거리/주문 112.4 m, BL6 일치 0.773
+  RL                 M=14 seed 10001: flow   218.2 s, 완료 3127/3147, 거리/주문 108.3 m, BL6 일치 0.763
+  RL                 M=14 seed 10002: flow   216.8 s, 완료 3198/3221, 거리/주문 107.7 m, BL6 일치 0.778
+  RL                 M=14 seed 10003: flow   210.8 s, 완료 3183/3204, 거리/주문 107.5 m, BL6 일치 0.770
+  RL                 M=14 seed 10004: flow   283.3 s, 완료 3193/3217, 거리/주문 111.2 m, BL6 일치 0.766
+  RL                 M=14 seed 10005: flow   217.0 s, 완료 3029/3041, 거리/주문 111.7 m, BL6 일치 0.780
+  RL                 M=14 seed 10006: flow   260.9 s, 완료 3187/3206, 거리/주문 110.6 m, BL6 일치 0.793
+  RL                 M=14 seed 10007: flow   227.4 s, 완료 3218/3233, 거리/주문 107.4 m, BL6 일치 0.783
+  RL                 M=14 seed 10008: flow   236.4 s, 완료 3190/3212, 거리/주문 109.1 m, BL6 일치 0.775
+  RL                 M=14 seed 10009: flow   213.8 s, 완료 3018/3030, 거리/주문 111.5 m, BL6 일치 0.764
+  RL                 M=14 seed 10010: flow   231.8 s, 완료 3121/3136, 거리/주문 109.7 m, BL6 일치 0.774
+  RL                 M=14 seed 10011: flow   231.2 s, 완료 3194/3222, 거리/주문 108.6 m, BL6 일치 0.789
+  RL                 M=14 seed 10012: flow   228.0 s, 완료 3067/3080, 거리/주문 110.0 m, BL6 일치 0.778
+  RL                 M=14 seed 10013: flow   248.3 s, 완료 3137/3145, 거리/주문 110.5 m, BL6 일치 0.781
+  RL                 M=14 seed 10014: flow   253.0 s, 완료 3287/3307, 거리/주문 107.7 m, BL6 일치 0.791
+  RL                 M=14 seed 10015: flow   246.0 s, 완료 3224/3240, 거리/주문 108.2 m, BL6 일치 0.777
+  RL                 M=14 seed 10016: flow   237.1 s, 완료 3233/3250, 거리/주문 108.5 m, BL6 일치 0.782
+  RL                 M=14 seed 10017: flow   225.3 s, 완료 3249/3271, 거리/주문 106.3 m, BL6 일치 0.788
+  RL                 M=14 seed 10018: flow   237.1 s, 완료 3184/3208, 거리/주문 108.3 m, BL6 일치 0.778
+  RL                 M=14 seed 10019: flow   217.3 s, 완료 3152/3174, 거리/주문 107.6 m, BL6 일치 0.773
+  RL                 M=14 seed 10020: flow   238.1 s, 완료 3241/3264, 거리/주문 106.7 m, BL6 일치 0.779
+  RL                 M=14 seed 10021: flow   226.2 s, 완료 3202/3225, 거리/주문 107.8 m, BL6 일치 0.777
+  RL                 M=14 seed 10022: flow   229.8 s, 완료 3233/3243, 거리/주문 106.9 m, BL6 일치 0.784
+  RL                 M=14 seed 10023: flow   282.0 s, 완료 3229/3249, 거리/주문 110.9 m, BL6 일치 0.784
+  RL                 M=14 seed 10024: flow   258.8 s, 완료 3189/3219, 거리/주문 111.1 m, BL6 일치 0.782
+  RL                 M=14 seed 10025: flow   203.2 s, 완료 3092/3124, 거리/주문 107.4 m, BL6 일치 0.775
+  RL                 M=14 seed 10026: flow   215.4 s, 완료 3173/3188, 거리/주문 107.5 m, BL6 일치 0.776
+  RL                 M=14 seed 10027: flow   213.7 s, 완료 3209/3226, 거리/주문 107.2 m, BL6 일치 0.782
+  RL                 M=14 seed 10028: flow   257.8 s, 완료 3303/3353, 거리/주문 108.6 m, BL6 일치 0.783
+  RL                 M=14 seed 10029: flow   314.8 s, 완료 3233/3272, 거리/주문 111.1 m, BL6 일치 0.773
+결정 지연 평균 0.69 ms (p95 1.07), 배정·재계획 포함 5.56 ms (p95 13.04), 평가 1107 s
+
+============================================================
+  RL (local_r8_ddqn_v2_s1) vs baselines  λ=320/hr  M=14  [last 30 ep]
+============================================================
+  Metric                                        RL
+  ----------------------------------------------------------
+  Throughput (orders/s)                    0.0884 
+  Completion Rate                          0.9936 
+  Avg Flow Time (s)                         238.1 
+  Avg Flow Time, censored (s)               237.4 
+  Avg Wait Time (s)                        19.794 
+  Decision Rate                            0.7399 
+  Dist/Order (m)                            108.9 
+  Total Distance (m)                      346,516 
+  Totes/Trip                                3.778 
+  Mid-Trip Rate                            0.5344 
+  Saving/Insertion (m)                     14.393 
+============================================================
+저장: C:\COIS\CNIE_rev\logs_exp\grid_free_reserve\lam320_M14_K4\local_r8_ddqn_v2_s1
