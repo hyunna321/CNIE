@@ -1,0 +1,11 @@
+arm=local_r8_ddqn_v2 ({'reward_mode': 'local', 'update_ratio': 8, 'feature_set': 'bl6', 'agent': 'global', 'mu': 'bl6', 'alpha_max': 1.0, 'loss': 'huber'}), λ=320/hr, 학습 M=[14], 평가 M=[14], K=4, grid_free_reserve, 특징 27차원
+local 보상 기준점 μ(λ) 추정 (BL6 prior 정책, ε = 0, 격자 5점 × 10 에피소드)
+  μ(λ=224.0/hr) =  165.96 ±  1.32 s  (10 에피소드)
+  μ(λ=248.0/hr) =  173.62 ±  3.50 s  (10 에피소드)
+  μ(λ=272.0/hr) =  188.17 ±  2.45 s  (10 에피소드)
+  μ(λ=296.0/hr) =  225.42 ±  5.62 s  (10 에피소드)
+  μ(λ=320.0/hr) =  325.43 ± 19.94 s  (10 에피소드)
+arm=local_r8_ddqn_v2 ({'reward_mode': 'local', 'update_ratio': 8, 'feature_set': 'bl6', 'agent': 'global', 'mu': 'bl6', 'alpha_max': 1.0, 'loss': 'huber'}), λ=320/hr, 학습 M=[14], 평가 M=[14], K=4, grid_free_reserve, 특징 27차원
+local 보상 기준점 μ(λ): C:\COIS\CNIE_rev\logs_exp\grid_free_reserve\lam320_M14_K4\local_mu.json 사용
+arm=local_r8_ddqn_v2 ({'reward_mode': 'local', 'update_ratio': 8, 'feature_set': 'bl6', 'agent': 'global', 'mu': 'bl6', 'alpha_max': 1.0, 'loss': 'huber'}), λ=320/hr, 학습 M=[14], 평가 M=[14], K=4, grid_free_reserve, 특징 27차원
+local 보상 기준점 μ(λ): C:\COIS\CNIE_rev\logs_exp\grid_free_reserve\lam320_M14_K4\local_mu.json 사용
