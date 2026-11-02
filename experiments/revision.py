@@ -27,6 +27,17 @@
     T6 : λ ∈ {240, 320} × M ∈ {10, 18} × K ∈ {2, 4}: select + baselines + E1 네트워크(해당 K, s1~3) 전이
          기준 행: (240, 14, 3)을 λ = 320 본실험 네트워크 s1~5로 전이 ((320, 14, 3)은 본실험 결과 재사용)
     T6-cells / T2-cells / T3-cells : 해당 묶음의 select + baselines만 (다른 PC에서 셀 베이스라인 선행용)
+    S1 : 보상 계수 민감도. local 비용 = 자기 토트 지연 + w_ext · 탑재 토트 지연 추정 + w_q · 큐잉 토트 지연
+         (자기 지연 계수 1 고정, 한 번에 계수 하나만 바꿈). 학습 시드 1~3 (E1~E3와 같음)
+           λ ∈ {240, 320} × {w_ext ∈ {0.5, 2}, w_q ∈ {0.5, 2}} (×½, ×2) = 8 설정 × 3 = 24 run
+         중심점 (1, 1) = 본실험 local_r8_ddqn_v2 s1~3 재사용 (기본 계수는 비트 단위로 같음, verify_revision.py train)
+         μ(λ)는 설정마다 다시 추정 (--mu-jobs개 동시) → run을 한 작업 풀(--jobs)로 학습, λ = 320 먼저
+         PC 2대 분할: S1-pc1 = w_ext 4 설정 (12 run), S1-pc2 = w_q 4 설정 (12 run). 두 PC가 쓰는 파일이 겹치지 않음
+           (run 폴더, logs/{arm}_s*.log, local_mu_wext*_wq*.json 모두 arm별)
+         예상 시간 (i7-13700, PC당 --jobs 6): run당 14~15.5 h (E2·E3·λ 280/320 감마 실측) × 2 차례 ≈ 29~31 h + μ 약 0.5 h
+    S1-extra : 항 제거 4 설정 (λ ∈ {240, 320} × {w_ext = 0, w_q = 0}) × 3 = 12 run, S1-extra-pc1 (w_ext = 0) /
+         S1-extra-pc2 (w_q = 0). S1 뒤 3번째 차례로 돌리면 PC당 약 +15 h
+    S1-status : S1 + S1-extra run별 진행 에피소드 (로그의 마지막 [Ep N] 줄)와 완료 여부 (이 PC의 --out 기준)
     T6-transfer / T2-transfer / T3-transfer : 전이 평가만
 
     단계 이름(select, baselines, mu, train, transfer)을 직접 쓸 때는 --cells "λ,M,K[,route]" ...와
@@ -57,6 +68,10 @@ ALL_KEYS     = ["BL1", "BL1F", "BL2", "BL3", "BL4", "BL5", "BL6", "BL7"]
 BASE_SEEDS   = [1, 2, 3, 4, 5]
 E_SEEDS      = [1, 2, 3]
 T2_M         = [8, 10, 12, 16, 18, 20]
+# 보상 계수 민감도: (λ, arm)
+S1_DESIGN    = [(lam, f"{BASE_ARM}_{t}") for lam in (320, 240) for t in ("wext0.5", "wext2", "wq0.5", "wq2")]
+S1_EXTRA     = [(lam, f"{BASE_ARM}_{t}") for lam in (320, 240) for t in ("wext0", "wq0")]
+S1_PC_TERM   = {"pc1": "_wext", "pc2": "_wq"}      # PC 분할: 항별
 
 
 @dataclass(frozen=True)
@@ -273,9 +288,27 @@ def step_mu(args, cells: List[Cell], arm: str):
     return not fails
 
 
+def step_mu_many(args, pairs: List[tuple]) -> List[tuple]:
+    """(셀, arm) 쌍마다 μ(λ) 표를 최대 --mu-jobs개 동시 추정 (각 프로세스가 LOCAL_MU_WORKERS개 작업자 사용)
+
+    출력: μ 추정이 성공한 쌍
+    """
+    items = [{"cmd": _train_base(args, c, arm) + ["--mu-only"], "name": f"μ {c} {arm}", "pair": (c, arm),
+              "log": os.path.join(c.dir(args.out), "logs", f"mu_{arm}.log")} for c, arm in pairs]
+    fails = run_procs(items, args.mu_jobs, args.dry_run)
+    progress(args, f"mu {len(pairs)}개 설정",
+             [f"{it['name']}: " + ("실패, 로그 " + it["log"] if it in fails else "완료") for it in items])
+    return [it["pair"] for it in items if it not in fails]
+
+
 def step_train(args, cells: List[Cell], arm: str, seeds: List[int]):
+    return step_train_many(args, [(c, arm) for c in cells], seeds, title=f"train {arm} 시드 {seeds}")
+
+
+def step_train_many(args, pairs: List[tuple], seeds: List[int], title: str):
+    """(셀, arm) 쌍 × 학습 시드를 한 작업 풀(--jobs)로 학습·테스트 (설정 사이에 빈 차례가 생기지 않게)"""
     items = []
-    for c in cells:
+    for c, arm in pairs:
         for s in seeds:
             d = os.path.join(c.dir(args.out), f"{arm}_s{s}")
             if all(os.path.isfile(os.path.join(d, f)) for f in ("agent.pt", "eval.csv")):
@@ -284,7 +317,7 @@ def step_train(args, cells: List[Cell], arm: str, seeds: List[int]):
             items.append({"cmd": _train_base(args, c, arm) + ["--seed", str(s)], "name": f"{c} {arm} s{s}",
                           "log": os.path.join(c.dir(args.out), "logs", f"{arm}_s{s}.log"), "dir": d})
     fails = run_procs(items, args.jobs, args.dry_run)
-    progress(args, f"train {arm} 시드 {seeds}",
+    progress(args, title,
              [f"{it['name']} → {it['dir']}" for it in items if it not in fails]
              + [f"실패 {it['name']} (rc={it.get('rc')}), 로그 {it['log']}" for it in fails] or ["모두 완료 상태"])
     return not fails
@@ -343,6 +376,28 @@ def check_same_eval(args, ckpts: List[Ckpt], cell: Cell, tag: str) -> List[str]:
     return out
 
 
+def s1_status(args, design: List[tuple]):
+    """민감도 run별 진행: 완료(eval.csv) / 학습 중 마지막 [Ep N] / 시작 전"""
+    import re
+    pat = re.compile(r"\[Ep\s+(\d+)\]")
+    n_done = 0
+    for lam, arm in design:
+        c = Cell(lam, 14, 3)
+        for s in E_SEEDS:
+            d = os.path.join(c.dir(args.out), f"{arm}_s{s}")
+            log = os.path.join(c.dir(args.out), "logs", f"{arm}_s{s}.log")
+            if os.path.isfile(os.path.join(d, "eval.csv")):
+                st, n_done = "완료", n_done + 1
+            elif os.path.isfile(log):
+                eps = pat.findall(open(log, encoding="utf-8", errors="replace").read())
+                age = (time.time() - os.path.getmtime(log)) / 3600
+                st = f"에피소드 {eps[-1] if eps else 0}/{args.episodes} (로그 갱신 {age:.1f} h 전)"
+            else:
+                st = "시작 전"
+            print(f"  λ={lam} {arm:30s} s{s}: {st}")
+    print(f"완료 {n_done}/{len(design) * len(E_SEEDS)}")
+
+
 # 묶음
 
 def bundle(args, name: str):
@@ -358,6 +413,16 @@ def bundle(args, name: str):
         arm = {"E2": "local_r8_ddqn_v2_gamma", "E3": "legacy_r8_ddqn_v2"}[name]
         if step_mu(args, [BASE_CELL], arm):
             step_train(args, [BASE_CELL], arm, E_SEEDS)
+    elif name in ("S1", "S1-pc1", "S1-pc2", "S1-extra", "S1-extra-pc1", "S1-extra-pc2"):
+        design = S1_EXTRA if "extra" in name else S1_DESIGN
+        pc = name.rsplit("-", 1)[-1]
+        if pc in S1_PC_TERM:
+            design = [(lam, arm) for lam, arm in design if S1_PC_TERM[pc] in arm]
+        pairs = step_mu_many(args, [(Cell(lam, 14, 3), arm) for lam, arm in design])
+        if pairs:
+            step_train_many(args, pairs, E_SEEDS, title=f"train {name} 보상 계수 민감도 시드 {E_SEEDS}")
+    elif name == "S1-status":
+        s1_status(args, S1_DESIGN + S1_EXTRA)
     elif name == "T1":
         step_select(args, [BASE_CELL], batching=True)
     elif name in ("T2", "T3", "T2-cells", "T3-cells", "T2-transfer", "T3-transfer"):
@@ -413,6 +478,7 @@ def main():
     p.add_argument("--out", default=os.path.join(REPO, "logs_exp"), help="결과 상위 폴더 (본실험 logs_exp)")
     p.add_argument("--workers", type=int, default=4, help="베이스라인 병렬 프로세스 수")
     p.add_argument("--jobs", type=int, default=6, help="동시 run_rl.py 프로세스 수 (학습/전이)")
+    p.add_argument("--mu-jobs", type=int, default=2, help="S1 μ(λ) 추정 동시 프로세스 수 (각 5 작업자)")
     p.add_argument("--sim-time", type=float, default=SIM_TIME)
     p.add_argument("--episodes", type=int, default=1000)
     p.add_argument("--n-test", type=int, default=30)

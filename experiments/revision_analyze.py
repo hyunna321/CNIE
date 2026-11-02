@@ -15,7 +15,11 @@
   - 2³ 요인 효과 (tab_conditions_effects): y = log(F̄_RL,seed / F̄_best), 반복 = 학습 시드, ±1 코딩 최소제곱
 출력 표
   tab_main, tab_sources, tab_variants, tab_routing_gap, tab_fleet, tab_conditions (+ _effects),
-  tab_app_diagnostics, fig_curves (+ _summary)
+  tab_app_diagnostics, fig_curves (+ _summary), tab_reward_sens (+ _summary)
+  tab_reward_sens: 보상 계수 민감도 (revision.py S1). λ ∈ {240, 320}, 설정마다 학습 시드 1~3
+    vs 중심점 (1, 1) = local_r8_ddqn_v2 같은 학습 시드 1~3: (학습 시드, 테스트 인스턴스) 대응 차이 (matched_compare)
+    vs BL6: 시드 단위 비교. 항 크기: BL6 prior(μ 추정 terms, 마지막 격자점 = 목표 λ)와 학습 후반 500 에피소드 curve.csv
+    _summary: λ × 항마다 F(w = 0, ½, 1, 2)와 로그 탄력성 (F(2) − F(½)) / F(1) / ln 4
 """
 import argparse
 import csv
@@ -213,6 +217,87 @@ def tab_variants(D, B, rng):
     return A.holm_table(rows)
 
 
+S_TERMS = {"wext": 0, "wq": 1}          # arm 꼬리 → local_w 위치
+
+
+def _sens_arms(D, cell):
+    """셀에 결과가 있는 민감도 arm: [(arm, 항, 계수)]"""
+    import re
+    out = []
+    for pol in _policies_in(D, cell):
+        m = re.fullmatch(re.escape(BASE) + r"_(wext|wq)([\d.]+)", pol)
+        if m:
+            out.append((pol, m[1], float(m[2])))
+    return sorted(out, key=lambda x: (x[1], x[2]))
+
+
+def _prior_terms(root, lam):
+    """BL6 prior 정책의 결정당 항 평균 (S1 μ 추정 파일의 목표 λ 격자점, 계수와 무관). 없으면 NaN"""
+    for path in sorted(glob.glob(os.path.join(root, SET, f"lam{lam:.0f}_M14_K3", "local_mu_w*.json"))):
+        tab = json.load(open(path, encoding="utf-8"))
+        if tab.get("terms"):
+            return dict(zip(("prior_own", "prior_ext", "prior_queue"), tab["terms"][-1]))
+    return {"prior_own": float("nan"), "prior_ext": float("nan"), "prior_queue": float("nan")}
+
+
+def _train_terms(root, lam, arm, seeds, last=500):
+    """학습 후반 last 에피소드 curve.csv의 결정당 항 평균 (시드 평균, 계수 곱 전)"""
+    vals = defaultdict(list)
+    for s in seeds:
+        p = os.path.join(root, SET, f"lam{lam:.0f}_M14_K3", f"{arm}_s{s}", "curve.csv")
+        if not os.path.isfile(p):
+            continue
+        rs = list(csv.DictReader(open(p, newline="")))[-last:]
+        for k in ("cost_own", "cost_ext", "cost_queue", "local_cost"):
+            if rs and k in rs[0]:
+                vals[k].append(np.mean([float(r[k]) for r in rs]))
+    return {f"train_{k}": float(np.mean(v)) for k, v in vals.items()}
+
+
+def tab_reward_sens(D, B, rng, seeds=(1, 2, 3)):
+    """보상 계수 민감도 표와 요약 (중심점은 기본 arm의 같은 학습 시드)"""
+    rows, summ = [], []
+    for lam in (240.0, 320.0):
+        cell = (SET, lam, 14, 3)
+        arms = _sens_arms(D, cell)
+        if not arms:
+            continue
+        prior = _prior_terms(D.root, lam)
+        sel = lambda rs: [r for r in rs if r["train_seed"] in seeds]
+        F = {}
+        for arm, term, w in [(BASE, None, 1.0)] + arms:
+            info = {"term": term or "center", "w_ext": w if term == "wext" else 1.0,
+                    "w_q": w if term == "wq" else 1.0, **prior, **_train_terms(D.root, lam, arm, seeds)}
+            for m in ("avg_flow_time", "J"):
+                pr = sel(D.get(*cell, arm, m))
+                if not pr:
+                    continue
+                diag = {}
+                for d in DIAG:
+                    v = [r["y"] for r in sel(D.get(*cell, arm, d)) if not math.isnan(r["y"])]
+                    diag[f"mean_{d}"] = float(np.mean(v)) if v else float("nan")
+                if m == "avg_flow_time":
+                    F[(term, w)] = diag["mean_avg_flow_time"]
+                    if term is None:
+                        F[("wext", 1.0)] = F[("wq", 1.0)] = F[(None, 1.0)]
+                base = {"table": "tab_reward_sens", "setting": SET, "lam": lam, "M": 14, "K": 3, "policy": arm,
+                        "policy_name": display_name(arm), "metric": m, **info, **diag}
+                bl6 = D.get(*cell, "BL6_MarginalCost", m)
+                if bl6:
+                    res = A.seed_level_compare(pr, bl6, B, rng)
+                    rows.append({**base, "ref": "BL6_MarginalCost", **(res or {})})
+                if term is not None:
+                    res = matched_compare(pr, sel(D.get(*cell, BASE, m)), B, rng)
+                    if res:
+                        rows.append({**base, "ref": f"{BASE} (w = 1, 1)", **res})
+        for term in ("wext", "wq"):
+            f = {w: F.get((term, w), float("nan")) for w in (0.0, 0.5, 1.0, 2.0)}
+            el = (f[2.0] - f[0.5]) / f[1.0] / math.log(4) if all(not math.isnan(f[w]) for w in (0.5, 1, 2))                 else float("nan")
+            summ.append({"lam": lam, "term": term, "F_w0": f[0.0], "F_w0.5": f[0.5], "F_w1": f[1.0],
+                         "F_w2": f[2.0], "log_elasticity": el, "n_train_seeds": len(seeds), **prior})
+    return A.holm_table(rows), summ
+
+
 def _seed_means(rows):
     by = defaultdict(list)
     for r in rows:
@@ -349,7 +434,7 @@ def main():
     rng = np.random.default_rng(args.seed)
     tdir = os.path.join(D.root, "revision_tables")
     want = set(args.tables or ["tab_main", "tab_sources", "tab_variants", "tab_routing_gap", "tab_fleet",
-                               "tab_conditions", "tab_app_diagnostics", "fig_curves"])
+                               "tab_conditions", "tab_app_diagnostics", "fig_curves", "tab_reward_sens"])
     simple = {"tab_main": tab_main, "tab_sources": tab_sources, "tab_variants": tab_variants,
               "tab_routing_gap": tab_routing_gap, "tab_fleet": tab_fleet, "tab_app_diagnostics": tab_app_diagnostics}
     for name, fn in simple.items():
@@ -372,6 +457,19 @@ def main():
         print(f"tab_conditions: {len(rows)}행, 요인 효과 {len(eff)}항")
         for e in eff:
             print(f"  {e['term']:10s} {e['coef']:+.4f} [{e['ci_lo']:+.4f}, {e['ci_hi']:+.4f}] p={e['p']:.4f}")
+    if "tab_reward_sens" in want:
+        rows, summ = tab_reward_sens(D, args.B, rng)
+        A._save(rows, os.path.join(tdir, "tab_reward_sens.csv"))
+        A._save(summ, os.path.join(tdir, "tab_reward_sens_summary.csv"))
+        print(f"tab_reward_sens: {len(rows)}행")
+        for r in rows:
+            if r["metric"] == "avg_flow_time" and "diff" in r:
+                print(f"  λ={r['lam']:.0f} w_ext={r['w_ext']:g} w_q={r['w_q']:g} vs {r['ref']:28s} "
+                      f"ΔF {r['diff']:+7.2f} s [{r['ci_lo']:+.2f}, {r['ci_hi']:+.2f}] ({r['rel_pct']:+.1f}%) "
+                      f"p={r['p']:.4f} p_holm={r['p_holm']:.4f}")
+        for r in summ:
+            print(f"  λ={r['lam']:.0f} {r['term']:4s} F(0, ½, 1, 2) = {r['F_w0']:.1f}, {r['F_w0.5']:.1f}, "
+                  f"{r['F_w1']:.1f}, {r['F_w2']:.1f}  탄력성 {r['log_elasticity']:+.4f}")
     if "fig_curves" in want:
         long, summ = fig_curves(D)
         A._save(long, os.path.join(tdir, "fig_curves.csv"))

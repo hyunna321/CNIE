@@ -23,6 +23,10 @@ arm (보상 모드, 업데이트 비율, 특징 세트):
                                 (RLSimulator discount="decision", μ(λ)는 기본 local_mu.json 공유)
       legacy_r8_ddqn_v2       : legacy shaped reward + 결정당 γ (원 논문 방식) + GlobalDQNAgent(α ≤ 1, Huber),
                                 μ(λ) 없음. BL6 prior 척도 1/Z는 그대로 (agents.GlobalDQNAgent 설명)
+    보상 계수 민감도 (local_r8_ddqn_v2에서 local 비용 항 계수 하나만 바꿈, 자기 토트 지연 계수는 1로 고정)
+      local_r8_ddqn_v2_wext{w} : 탑재 토트 지연 추정 항 계수 w_ext = w (기본 1)
+      local_r8_ddqn_v2_wq{w}   : 직후 큐잉 토트 지연 항 계수 w_q = w (기본 1)
+                                 w ∈ {0, 0.25, 0.5, 2, 4}. μ(λ)는 계수별 파일 local_mu_wext{a}_wq{b}.json
 
 평가 옵션
     --route fixed_dock 도킹 순서(복귀 WS)를 트립 출발 시 고정 (RL·베이스라인 공통)
@@ -96,7 +100,10 @@ ARMS.update({
     "legacy_r8_ddqn_v2":      dict(reward_mode="legacy", update_ratio=8, feature_set="bl6", agent="global",
                                    alpha_max=1.0, loss="huber"),
 })
-SIM_KEYS = ("discount",)    # arm 설정 중 RLSimulator 인자 (학습·검증)
+for _w in (0.0, 0.25, 0.5, 2.0, 4.0):     # 보상 계수 민감도 arm (experiments/revision.py S1)
+    ARMS[f"local_r8_ddqn_v2_wext{_w:g}"] = dict(_V2, local_w=(_w, 1.0))
+    ARMS[f"local_r8_ddqn_v2_wq{_w:g}"]   = dict(_V2, local_w=(1.0, _w))
+SIM_KEYS = ("discount", "local_w")    # arm 설정 중 RLSimulator 인자 (학습·검증)
 
 
 def summarize(root: str):
@@ -252,7 +259,8 @@ def main():
     cell_dir = os.path.join(setting_dir, f"lam{args.lam:.0f}_M{spec}_K{args.ws}")
     if args.mu_only:
         if cfg.get("mu") == "bl6":
-            load_or_estimate_local_mu(cell_dir, {M: layout_for(M) for M in train_Ms}, agent, lam, args.sim_time)
+            load_or_estimate_local_mu(cell_dir, {M: layout_for(M) for M in train_Ms}, agent, lam, args.sim_time,
+                                      local_w=cfg.get("local_w", (1.0, 1.0)))
         return
 
     if args.load:
@@ -268,7 +276,8 @@ def main():
             os.remove(resume_path)
         tr_layouts = {M: layout_for(M) for M in train_Ms}
         if cfg.get("mu") == "bl6" and not os.path.isfile(resume_path):
-            agent.mu_table = load_or_estimate_local_mu(cell_dir, tr_layouts, agent, lam, args.sim_time)
+            agent.mu_table = load_or_estimate_local_mu(cell_dir, tr_layouts, agent, lam, args.sim_time,
+                                                       local_w=cfg.get("local_w", (1.0, 1.0)))
         run_info["resumed"] = os.path.isfile(resume_path)      # True이면 train_wall_s는 이어한 구간만
         tr_store, curve, val_store = MetricsStore(), TrainingCurveStore(), MetricsStore()
         validate = None

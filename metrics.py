@@ -162,6 +162,9 @@ class TrainingPoint:
     td_abs:        float = float("nan")   # 이 에피소드 업데이트들의 평균 |TD 오차|
     local_mu:      float = float("nan")   # s, local 보상 기준점 μ
     local_cost:    float = float("nan")   # s, 결정당 평균 국소 비용 (μ와 무관, 보상 추세 대신 제시용)
+    cost_own:      float = float("nan")   # s, local 비용 항별 결정당 평균 (계수 곱 전): 자기 토트 지연
+    cost_ext:      float = float("nan")   # s, 탑재 토트 지연 추정
+    cost_queue:    float = float("nan")   # s, 직후 큐잉 토트 지연
 
 
 class TrainingCurveStore:

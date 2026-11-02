@@ -24,55 +24,78 @@ MU_SEED           = 0         # μ(λ) 추정 에피소드 시드 구간 (학습
 MU_EPISODE_OFFSET = 90_000    # μ(λ) 추정 에피소드 번호 (학습 에피소드 1..TOTAL과 겹치지 않음)
 
 
-def _mu_point(job) -> List[float]:
-    """작업자 프로세스: λ 격자 점 하나의 에피소드별 결정당 평균 국소 비용"""
-    agent, layouts, l, i, n_seeds, sim_time = job
-    costs = []
+DEFAULT_LOCAL_W = (1.0, 1.0)  # local 비용 항 계수 (w_ext, w_q) 기본값
+
+
+def local_mu_filename(local_w=DEFAULT_LOCAL_W) -> str:
+    """μ(λ) 표 파일 이름: 기본 계수는 local_mu.json (기존 arm 공유), 아니면 계수별 파일"""
+    w = tuple(float(x) for x in local_w)
+    return "local_mu.json" if w == DEFAULT_LOCAL_W else f"local_mu_wext{w[0]:g}_wq{w[1]:g}.json"
+
+
+def _mu_point(job) -> tuple:
+    """작업자 프로세스: λ 격자 점 하나의 에피소드별 결정당 평균 국소 비용과 항별 평균 (계수 곱 전)"""
+    agent, layouts, l, i, n_seeds, sim_time, local_w = job
+    costs, terms = [], []
     for M, L in sorted(layouts.items()):
         sim = RLSimulator(L, agent, lam=l, seed=MU_SEED, sim_time=sim_time, num_robots=M,
-                          robot_capacity=L.robot_capacity, eval_mode=True, reward_mode="local")
+                          robot_capacity=L.robot_capacity, eval_mode=True, reward_mode="local", local_w=local_w)
         for j in range(n_seeds):
             sim.reset(train_episode_seed(MU_SEED, MU_EPISODE_OFFSET + i * n_seeds + j))
             sim.run()
             costs.append(sim.last_mean_cost)
-    return costs
+            terms.append(sim.last_cost_terms)
+    return costs, terms
 
 
 def estimate_local_mu(layouts: Dict[int, object], agent: DQNAgent, lam: float, sim_time: float,
                       n_points: int = LOCAL_MU_POINTS, n_seeds: int = LOCAL_MU_SEEDS,
-                      workers: int = LOCAL_MU_WORKERS, verbose: bool = True) -> dict:
+                      workers: int = LOCAL_MU_WORKERS, verbose: bool = True,
+                      local_w=DEFAULT_LOCAL_W) -> dict:
     """local 보상 고정 기준점 μ(λ) 표 (학습 전 호출)
 
     학습 전 에이전트(f의 마지막 층 = 0이라 argmax = BL6 prior, 가중치 초기화와 무관)를 ε = 0으로
     [λ·margin, λ] 격자에서 실행해 결정당 평균 국소 비용을 구함. 에피소드 시드는 학습 시드와 무관한 공통 구간이라
     같은 셀의 모든 학습 시드가 같은 표를 씀. 학습 중 보상 기준점이 움직이지 않음
 
+    local_w: local 비용 항 계수 (w_ext, w_q). BL6 prior 궤적은 계수와 무관하고 μ만 계수에 따라 달라짐
+
     출력:
         {"lam": [orders/s], "mu": [s], "se": [s, 표준오차], "n_seeds", "sim_time", ...}  ("lam", "mu" → agent.mu_table)
+        "terms": 격자 점마다 결정당 평균 [자기 지연, 탑재 지연 추정, 큐잉 지연] (계수 곱 전, 항 크기 비교용)
     """
     assert agent.mu_table is None and agent.steps == 0, "학습 전에 호출해야 합니다"
     lams = [float(l) for l in np.linspace(lam * CURRICULUM_LAM_MARGIN, lam, n_points)] if n_points > 1 else [lam]
-    jobs = [(agent, layouts, l, i, n_seeds, sim_time) for i, l in enumerate(lams)]
+    local_w = tuple(float(x) for x in local_w)
+    jobs = [(agent, layouts, l, i, n_seeds, sim_time, local_w) for i, l in enumerate(lams)]
     if workers > 1:
         with ProcessPoolExecutor(min(workers, len(jobs))) as ex:
-            all_costs = list(ex.map(_mu_point, jobs))
+            res = list(ex.map(_mu_point, jobs))
     else:
-        all_costs = [_mu_point(j) for j in jobs]
+        res = [_mu_point(j) for j in jobs]
+    all_costs = [c for c, _ in res]
+    terms = [np.mean(np.asarray(t, dtype=float), axis=0).tolist() for _, t in res]
     mus = [float(np.mean(c)) for c in all_costs]
     ses = [float(np.std(c, ddof=1) / math.sqrt(len(c))) if len(c) > 1 else float("nan") for c in all_costs]
     if verbose:
         for l, m, s, c in zip(lams, mus, ses, all_costs):
             print(f"  μ(λ={l * 3600:5.1f}/hr) = {m:7.2f} ± {s:5.2f} s  ({len(c)} 에피소드)", flush=True)
-    return {"lam": lams, "mu": mus, "se": ses, "n_seeds": n_seeds, "n_points": n_points,
-            "sim_time": sim_time, "margin": CURRICULUM_LAM_MARGIN, "Ms": sorted(layouts)}
+    out = {"lam": lams, "mu": mus, "se": ses, "n_seeds": n_seeds, "n_points": n_points,
+           "sim_time": sim_time, "margin": CURRICULUM_LAM_MARGIN, "Ms": sorted(layouts), "terms": terms}
+    if local_w != DEFAULT_LOCAL_W:
+        out["local_w"] = list(local_w)
+    return out
 
 
 def load_or_estimate_local_mu(cell_dir: str, layouts: Dict[int, object], agent: DQNAgent, lam: float,
-                              sim_time: float) -> tuple:
-    """셀 폴더의 local_mu.json을 읽거나 (조건이 같을 때) 새로 추정해 저장, agent.mu_table 형식으로 반환"""
-    path = os.path.join(cell_dir, "local_mu.json")
+                              sim_time: float, local_w=DEFAULT_LOCAL_W) -> tuple:
+    """셀 폴더의 μ(λ) 표(local_mu_filename)를 읽거나 (조건이 같을 때) 새로 추정해 저장, agent.mu_table 형식으로 반환"""
+    local_w = tuple(float(x) for x in local_w)
+    path = os.path.join(cell_dir, local_mu_filename(local_w))
     want = {"n_seeds": LOCAL_MU_SEEDS, "n_points": LOCAL_MU_POINTS, "sim_time": sim_time,
             "margin": CURRICULUM_LAM_MARGIN, "Ms": sorted(layouts)}
+    if local_w != DEFAULT_LOCAL_W:          # 기본 파일(기존 기록)에는 local_w 키가 없음
+        want["local_w"] = list(local_w)
     if os.path.isfile(path):
         with open(path, encoding="utf-8") as f:
             tab = json.load(f)
@@ -82,7 +105,7 @@ def load_or_estimate_local_mu(cell_dir: str, layouts: Dict[int, object], agent: 
         print(f"local 보상 기준점 μ(λ): {path} 조건 불일치, 다시 추정", flush=True)
     print(f"local 보상 기준점 μ(λ) 추정 (BL6 prior 정책, ε = 0, 격자 {LOCAL_MU_POINTS}점 × {LOCAL_MU_SEEDS} 에피소드)",
           flush=True)
-    tab = estimate_local_mu(layouts, agent, lam, sim_time)
+    tab = estimate_local_mu(layouts, agent, lam, sim_time, local_w=local_w)
     os.makedirs(cell_dir, exist_ok=True)
     tmp = path + f".tmp{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -222,7 +245,9 @@ def train(layouts: Union[Dict[int, object], object], agent: DQNAgent, store: Met
                 lam=ep_lam * 3600, alpha=alpha,
                 q_mean=q_sum / n_done if n_done else float("nan"),
                 td_abs=td_sum / n_done if n_done else float("nan"),
-                local_mu=sim.last_mu, local_cost=sim.last_mean_cost))
+                local_mu=sim.last_mu, local_cost=sim.last_mean_cost,
+                cost_own=sim.last_cost_terms[0], cost_ext=sim.last_cost_terms[1],
+                cost_queue=sim.last_cost_terms[2]))
 
         if ep % verbose_every == 0:
             loss_s  = f"{loss:.4f}" if loss is not None else "warmup"

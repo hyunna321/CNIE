@@ -13,6 +13,8 @@
       비용 = (토트 k WS 처리 완료 − 결정 시각) + 탑재 토트 지연 추정 (n_onboard · Δd / v)
              + 결정 k 직후(다음 결정 전) 후보가 없어 큐에 들어간 토트들의 (완료 − 큐 진입)
       보상 = −(비용 − μ) / scale. 완료 시각을 알아야 하므로 에피소드 종료 후 일괄 계산
+      항 계수 local_w = (w_ext, w_q): 비용 = 자기 토트 지연 + w_ext · 탑재 토트 지연 추정 + w_q · 큐잉 토트 지연
+        (기본 (1, 1) = 위 정의, 계수 민감도 arm local_r8_ddqn_v2_wext*/wq*. 1.0 곱은 정확하므로 기본값은 비트 단위로 같음)
       μ: 에이전트에 고정 기준점 μ(λ)가 있으면 그 값 (agent.local_mu, v2), 없으면 학습 누적 평균 (v1)
       (에피소드 끝까지 완료되지 않은 토트는 sim_time까지로 자름)
 할인 방식 (discount 인자): "time"이면 위 규칙, "decision"이면 보상 모드와 무관하게 결정당 γ
@@ -51,7 +53,7 @@ class RLSimulator(SimulatorBase):
                  sim_time: float = SIM_TIME, num_robots: int = NUM_ROBOTS,
                  robot_capacity: int = ROBOT_CAPACITY, eval_mode: bool = False,
                  reward_mode: str = "smdp", reward_cfg: Optional[Dict] = None,
-                 discount: str = "time", **sim_opts):
+                 discount: str = "time", local_w: Tuple[float, float] = (1.0, 1.0), **sim_opts):
         """
         입력:
             layout: GridWarehouseLayout
@@ -66,6 +68,7 @@ class RLSimulator(SimulatorBase):
             reward_cfg: legacy compute_reward 가중치 덮어쓰기용 kwargs
             discount: 전이 할인 방식. "time" (기본: smdp/local은 e^{−βτ}, legacy는 γ),
                       "decision" (보상 모드와 무관하게 결정당 γ = GAMMA, arm local_r8_ddqn_v2_gamma)
+            local_w: local 비용 항 계수 (w_ext 탑재 토트 지연 추정, w_q 큐잉 토트 지연), 자기 토트 지연 계수는 1
             sim_opts: SimulatorBase 추가 인자 (route)
         """
         assert reward_mode in REWARD_MODES, reward_mode
@@ -76,6 +79,7 @@ class RLSimulator(SimulatorBase):
         self.reward_mode = reward_mode
         self.reward_cfg  = reward_cfg or {}
         self.discount    = discount
+        self.w_ext, self.w_q = float(local_w[0]), float(local_w[1])
         self.use_global  = getattr(agent, "uses_global", False)
         self._init_rl_state()
 
@@ -88,6 +92,7 @@ class RLSimulator(SimulatorBase):
         self._queued: List[tuple] = []        # local: (직전 결정 번호, 토트, 큐 진입 시각)
         self.last_mu        = float("nan")    # local: 이번 에피소드 보상 기준점 μ (s)
         self.last_mean_cost = float("nan")    # local: 이번 에피소드 결정당 평균 국소 비용 (s, μ와 무관)
+        self.last_cost_terms = (float("nan"),) * 3   # local: 결정당 평균 (자기 지연, 탑재 지연 추정, 큐잉 지연), 계수 곱 전
         # 결정 통계 (보상 모드와 무관하게 집계): 결정 수, 후보 수 합, 큐 압박 항 / 소진 페널티 활성 횟수
         self._n_dec = self._n_cands = self._n_qpen = self._n_depl = 0
 
@@ -126,11 +131,17 @@ class RLSimulator(SimulatorBase):
         """local: 결정별 국소 비용을 계산해 전이 보상을 채움 (전이 i = 결정 i)"""
         T = self.sim_time
         done_t = lambda t: t.done_time if t.done_time is not None else T
-        cost = [done_t(t) - t_k + ext for t, t_k, ext in self._decisions]
+        cost = [done_t(t) - t_k + self.w_ext * ext for t, t_k, ext in self._decisions]
+        q_sum = 0.0
         for k, t, t_q in self._queued:
-            cost[k] += done_t(t) - t_q
+            q = done_t(t) - t_q
+            cost[k] += self.w_q * q
+            q_sum += q
         if not cost:
             return
+        n = len(cost)
+        self.last_cost_terms = (sum(done_t(t) - t_k for t, t_k, _ in self._decisions) / n,
+                                sum(ext for _, _, ext in self._decisions) / n, q_sum / n)
         a = self.agent
         if not self.eval_mode:
             a.local_cost_sum = getattr(a, "local_cost_sum", 0.0) + sum(cost)
