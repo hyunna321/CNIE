@@ -17,4 +17,4 @@ sens:                          # 보상 계수 민감도
   lams: [320, 240]
   terms: [wext0.5, wext2, wq0.5, wq2]
   removal_terms: [wext0, wq0]
-route_variants: [fixed_dock, fixed_return]
+route_variants: [fixed_dock]

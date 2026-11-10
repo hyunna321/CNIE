@@ -10,7 +10,7 @@ ws: 3
 sim_time: 36000   # s
 traffic: free     # free | lanes
 motion: reserve   # reserve | reactive
-route: nnh        # nnh | fixed_dock | fixed_return
+route: nnh        # nnh | fixed_dock
 # grid: [3, 14, 20]   # 블록 수, 블록당 통로 수, 선반 행 수
 # scenario: {arrival: batch, batch_mean: 6}
 

@@ -7,7 +7,7 @@
     python -m experiments.run_compare --load runs/<이름>/.../agent.pt --robots 18 --tag xfer    # 재학습 없는 일반화
     python -m experiments.run_compare --summarize --out runs/<이름>       # 셀별 run/베이스라인 평균, BL6 대비 차이
 
-    --route fixed_dock|fixed_return  경로 구성 규칙 (RL·베이스라인 공통) → setting과 RL run 이름에 _route-* 꼬리표
+    --route fixed_dock               경로 구성 규칙 (RL·베이스라인 공통) → setting과 RL run 이름에 _route-* 꼬리표
     --no-collisions                  reactive에서 로봇 간 셀 점유를 무시 (회귀 검증용)
 
 --load 시 arm/학습 시드/학습 M/학습 λ는 체크포인트 기록을 따름

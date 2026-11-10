@@ -11,8 +11,6 @@
   - "nnh"       : 위 규칙 (기본)
   - "fixed_dock": 도킹 셀 순서(따라서 복귀 WS)를 트립 출발 시 NNH로 정한 뒤 고정, 삽입으로 새 WS가 생기면
                   맨 뒤에 추가 (피킹 셀은 NNH로 다시 구성)
-  - "fixed_return": 복귀 WS(마지막 도킹 셀)만 트립 출발 시 NNH 결과로 고정, 삽입 후에도 맨 뒤 유지
-                  (그 앞의 도킹 셀과 피킹 셀은 NNH로 다시 구성, 새 WS는 복귀 WS 앞에 들름)
 """
 from __future__ import annotations
 
@@ -21,7 +19,7 @@ from typing import Callable, List, Tuple
 
 from env.layout import Cell, GridWarehouseLayout, ROBOT_SPEED
 
-ROUTE_MODES = ("nnh", "fixed_dock", "fixed_return")   # 트립 경로 구성 규칙 (모듈 설명)
+ROUTE_MODES = ("nnh", "fixed_dock")   # 트립 경로 구성 규칙 (모듈 설명)
 
 
 def nearest_neighbor_route(
@@ -129,7 +127,6 @@ class Robot:
         self.plan              = deque()     # (틱, 셀) 순서의 예약 경로
         self.replan_pending    = False
         self.pending_insert    = []          # 계획 실패로 아직 경로에 넣지 못한 삽입 토트 위치
-        self.return_dock       = None        # 트립 출발 시 정한 복귀 도킹 셀 (fixed_return에서 유지)
 
     @property
     def stops(self) -> List[Cell]:
@@ -157,17 +154,10 @@ class Robot:
 
         keep_docks: 운행 중 재구성이면 True (fixed_dock에서 남은 도킹 순서 유지 + 새 WS는 맨 뒤)
         """
-        fixed = keep_docks and (self.route_mode == "fixed_dock"
-                                or (self.route_mode == "fixed_return" and self.return_dock in docks))
-        if not fixed:
+        if not (keep_docks and self.route_mode == "fixed_dock"):
             return plan_trip(start, picks, docks, self._md)
         pick_route = nearest_neighbor_route(start, picks, self._md)
-        if self.route_mode == "fixed_dock":
-            order = [d for d in self.drops if d in docks] + [d for d in docks if d not in self.drops]
-        else:
-            last  = pick_route[-1] if pick_route else start
-            order = nearest_neighbor_route(last, [d for d in docks if d != self.return_dock], self._md) \
-                + [self.return_dock]
+        order = [d for d in self.drops if d in docks] + [d for d in docks if d not in self.drops]
         return pick_route, order, path_distance(start, pick_route + order, self._md)
 
     def arrive_at_node(self) -> bool:
@@ -189,7 +179,6 @@ class Robot:
             docks: 하역할 도킹 셀
         """
         self.route, self.drops, _ = self._plan(self.pos, picks, docks, keep_docks=False)
-        self.return_dock = self.drops[-1] if self.drops else None   # fixed_return: 출발 시 복귀 WS
         self._set_final_ws()
         self.idle_slots  = self.capacity - len(picks)
         self.is_idle     = False
