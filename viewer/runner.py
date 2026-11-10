@@ -8,36 +8,27 @@ from typing import Dict, List, Optional
 from constant import DEFAULT_SEED, ROBOT_CAPACITY, SIM_TIME
 from grid import GridWarehouseLayout, RACK, AISLE, CROSS, WS_ZONE
 from scenario import Scenario, ARRIVALS, SKU_DISTS, STORAGES, TIME_DISTS
+from evaluation import POLICIES as EVAL_POLICIES, make_sim
 from viewer.recorder import Recorder
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-POLICIES = {
-    "BL1": "BL1 Full-Buffer",
-    "BL2": "BL2 Partial-Buffer",
-    "BL3": "BL3 Random",
-    "BL4": "BL4 Nearest",
-    "BL5": "BL5 Min-Insertion",
-    "BL6": "BL6 Marginal-Cost",
-    "GR":  "Greedy_R (legacy reward)",
-    "RL":  "RL (checkpoint)",
-}
+# 화면 선택지: 정책 키 -> 표시 이름 (evaluation.POLICIES + RL 체크포인트)
+POLICIES = {k: label for k, (label, _) in EVAL_POLICIES.items()} | {"RL": "RL (checkpoint)"}
 
 
 def find_checkpoints() -> List[str]:
-    """저장소 안의 체크포인트(*.pt) 경로 (가상환경 제외, 최근 수정 순)"""
+    """저장소 안의 체크포인트(*.pt, 이어하기 파일 제외) 경로 (가상환경 제외, 최근 수정 순)"""
     paths = [p for p in glob.glob(os.path.join(REPO, "**", "*.pt"), recursive=True)
-             if "/.venv/" not in p and "/site-packages/" not in p]
+             if "/.venv/" not in p and "/site-packages/" not in p and os.path.basename(p) != "resume.pt"]
     paths.sort(key=os.path.getmtime, reverse=True)
     return [os.path.relpath(p, REPO) for p in paths]
 
 
 def read_checkpoint_meta(path: str) -> dict:
-    """체크포인트의 용량/로봇 수/WS 수/특징 세트와 학습 조건(meta)"""
-    import torch
-    ckpt = torch.load(_abs(path), map_location="cpu")
-    return {k: ckpt.get(k) for k in ("robot_capacity", "num_robots", "num_workstations", "sim_time",
-                                     "feature_set")} | {"meta": ckpt.get("meta", {})}
+    """체크포인트의 용량/로봇 수/WS 수와 학습 조건(meta)"""
+    from agents import read_checkpoint
+    return read_checkpoint(_abs(path))
 
 
 def meta() -> dict:
@@ -77,9 +68,6 @@ def layout_info(L: GridWarehouseLayout) -> dict:
 
 def run(cfg: Dict) -> dict:
     """뷰어 설정 cfg로 시뮬레이션을 돌리고 지도, 기록, 요약 지표 반환"""
-    from baselines import (FullBufferSimulator, PartialSimulator, RandomAssignSimulator,
-                           NearestRobotSimulator, MinInsertionSimulator, MarginalCostSimulator,
-                           GreedyRewardSimulator)
     t_wall = time.time()
     cfg = {"policy": "BL6", "num_robots": 14, "num_workstations": 3, "robot_capacity": ROBOT_CAPACITY,
            "lam_hr": 320, "sim_time": 3600, "seed": 10000, "traffic": "free", "motion": "reserve",
@@ -95,14 +83,10 @@ def run(cfg: Dict) -> dict:
                             scenario=sc)
     policy   = cfg.get("policy", "BL6")
     warnings = []
-    kw = dict(lam=lam, seed=seed, sim_time=T, num_robots=M, robot_capacity=cap)
     if policy == "RL":
-        sim = _rl_simulator(cfg, L, sc, M, K, cap, warnings, kw)
+        sim = _rl_simulator(cfg, L, sc, M, K, cap, lam, seed, T, warnings)
     else:
-        cls = {"BL1": FullBufferSimulator, "BL2": PartialSimulator, "BL3": RandomAssignSimulator,
-               "BL4": NearestRobotSimulator, "BL5": MinInsertionSimulator, "BL6": MarginalCostSimulator,
-               "GR": GreedyRewardSimulator}[policy]
-        sim = cls(L, **kw)
+        sim = make_sim(policy, L, lam, seed, T)
     rec = Recorder()
     sim.recorder = rec
     sim.reset(seed)
@@ -119,29 +103,35 @@ def run(cfg: Dict) -> dict:
     }
 
 
-def _rl_simulator(cfg: Dict, L, sc: Scenario, M: int, K: int, cap: int, warnings: List[str], kw: Dict):
-    """체크포인트를 불러와 ε = 0 RLSimulator 생성 (보상 모드는 체크포인트 학습 조건을 따름)"""
-    from agents import DQNAgent, FEATURE_SETS
-    from rl_simulator import RLSimulator
+def _rl_simulator(cfg: Dict, L, sc: Scenario, M: int, K: int, cap: int, lam: float, seed: int, T: float,
+                  warnings: List[str]):
+    """체크포인트를 불러와 ε = 0 RLSimulator 생성 (보상 설정은 체크포인트 arm을 따름)
+
+    BL6 prior 척도는 지금 레이아웃 기준으로 다시 맞춤 (run_rl.py --load 기본 동작과 같음)
+    """
+    from agents import DQNAgent
+    from rewards import ARMS
     path = cfg.get("checkpoint")
     if not path:
         raise ValueError("RL 정책은 체크포인트 경로가 필요합니다")
     info = read_checkpoint_meta(path)
     if info["robot_capacity"] != cap:
         raise ValueError(f"체크포인트 로봇 용량 {info['robot_capacity']} ≠ 설정 {cap} (특징 차원이 달라 불러올 수 없습니다)")
-    fs = info.get("feature_set") or "base"
-    if fs not in FEATURE_SETS:
-        raise ValueError(f"지원하지 않는 특징 세트 '{fs}' 체크포인트입니다 (지금 코드: {', '.join(FEATURE_SETS)})")
-    agent = DQNAgent(robot_capacity=cap, num_robots=M, num_workstations=K,
-                     sim_time=info.get("sim_time") or SIM_TIME, feature_set=fs)
+    if info["num_workstations"] != K:
+        raise ValueError(f"체크포인트 WS 수 {info['num_workstations']} ≠ 설정 {K} (전역 상태 차원이 달라 불러올 수 없습니다)")
+    m = info.get("meta") or {}
+    arm = ARMS.get(m.get("arm"))
+    if arm is None:
+        raise ValueError(f"체크포인트 arm '{m.get('arm')}'은 지금 코드의 rewards.ARMS에 없습니다")
+    agent = DQNAgent(robot_capacity=cap, dist_norm=L.dist_norm, num_robots=M, num_workstations=K,
+                     sim_time=info.get("sim_time") or SIM_TIME, n_step=arm.n_step, features=arm.features)
     try:
         agent.load(_abs(path))
     except RuntimeError:
-        raise ValueError("체크포인트 특징 차원이 지금 코드와 다릅니다 (토트 단위 이식 전 체크포인트일 수 있음)")
-    m = info.get("meta") or {}
-    reward_mode = m.get("reward_mode") or "smdp"
+        raise ValueError("체크포인트 네트워크 구조가 지금 코드와 다릅니다 (이전 버전 체크포인트일 수 있음)")
+    agent.set_mc_scale(L.dist_norm)
     warnings += _ckpt_warnings(m, cfg, sc, M, K)
-    return RLSimulator(L, agent, eval_mode=True, reward_mode=reward_mode, **kw)
+    return make_sim("RL", L, lam, seed, T, agent=agent, arm=arm)
 
 
 def _ckpt_warnings(m: dict, cfg: dict, sc: Scenario, M: int, K: int) -> List[str]:

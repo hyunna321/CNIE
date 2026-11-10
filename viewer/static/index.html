@@ -295,7 +295,7 @@ async function showCkptMeta() {
   const r = await (await fetch("/api/checkpoint", { method: "POST", body: JSON.stringify({ path }) })).json();
   if (r.error) { $("ckptMeta").textContent = r.error; return; }
   const m = r.meta || {};
-  $("ckptMeta").textContent = m.lam ? `학습: ${m.arm || r.feature_set} · λ=${Math.round(m.lam * 3600)}/hr, M=${m.num_robots}, K=${m.num_workstations}, ` +
+  $("ckptMeta").textContent = m.lam ? `학습: ${m.arm || "?"} · λ=${Math.round(m.lam * 3600)}/hr, M=${m.num_robots}, K=${m.num_workstations}, ` +
     `${m.traffic}/${m.motion}, ${m.episodes} episodes` : "학습 조건 기록 없음";
 }
 async function runSim() {

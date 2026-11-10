@@ -19,7 +19,7 @@ from typing import List, Tuple
 
 from constant import PICK_TIME, WS_PROC_TIME, ORDER_LINES_MEAN, ORDER_LINES_MAX
 
-ARRIVALS      = ("poisson", "nhpp_peak", "nhpp_sine", "batch", "renewal")
+ARRIVALS      = ("poisson", "nhpp_peak", "nhpp_sine", "nhpp_steps", "batch", "renewal")
 SKU_DISTS     = ("uniform", "abc", "zipf")
 STORAGES      = ("random", "class_based")
 TIME_DISTS    = ("fixed", "uniform", "exponential", "lognormal")
@@ -38,6 +38,8 @@ class Scenario:
     batch_mean:     float = 5.0    # batch: 한 번에 들어오는 평균 주문 수 (묶음 도착 = 웨이브)
     batch_fixed:    bool  = False  # batch: True면 묶음 크기 고정, False면 기하분포
     scv:            float = 1.0    # renewal: 도착 간격의 변동계수 제곱 (0 일정, <1 Erlang, 1 지수, >1 초지수)
+    step_rates:     Tuple[float, ...] = ()   # nhpp_steps: 시뮬레이션 시간을 같은 길이 구간으로 나눈 구간별 λ 배수
+                                             #   (평균 1이어야 함). 예: λ = 240, (200, 320, 200, 280, 200) / 240
     # 주문 크기: 주문 1건의 서로 다른 SKU 수 (SKU 1개 = 토트 1개). 1 + 기하분포, lines_max에서 절단
     lines_mean:     float = ORDER_LINES_MEAN   # 절단 전 평균 (1이면 단일 SKU 주문)
     lines_max:      int   = ORDER_LINES_MAX
@@ -63,6 +65,12 @@ class Scenario:
         assert self.pick_dist in TIME_DISTS and self.ws_proc_dist in TIME_DISTS
         if self.arrival == "nhpp_peak" and self.peak_mult * self.peak_len > 1.0 + 1e-9:
             raise ValueError("nhpp_peak: peak_mult × peak_len이 1 이하여야 평균 λ를 맞출 수 있습니다")
+        self.step_rates = tuple(float(x) for x in self.step_rates)
+        if self.arrival == "nhpp_steps":
+            if not self.step_rates or min(self.step_rates) < 0:
+                raise ValueError("nhpp_steps: step_rates(구간별 λ 배수)가 필요합니다")
+            if abs(sum(self.step_rates) / len(self.step_rates) - 1.0) > 1e-6:
+                raise ValueError("nhpp_steps: step_rates 평균이 1이어야 평균 λ를 맞출 수 있습니다")
         if self.arrival == "nhpp_sine" and not (0.0 <= self.sine_amp <= 1.0):
             raise ValueError("nhpp_sine: sine_amp는 0~1이어야 합니다")
         self.lines_max = int(self.lines_max)
@@ -72,7 +80,13 @@ class Scenario:
             raise ValueError("abc: abc_items, abc_demand는 0과 1 사이여야 합니다")
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        """필드 dict (step_rates가 비어 있으면 빼서 이전 시나리오 기록·해시와 같게)"""
+        d = asdict(self)
+        if not d["step_rates"]:
+            del d["step_rates"]
+        else:
+            d["step_rates"] = list(d["step_rates"])
+        return d
 
     @property
     def is_default(self) -> bool:
@@ -113,6 +127,9 @@ class OrderStream:
             return (1.0 - sc.peak_mult * sc.peak_len) / max(1e-9, 1.0 - sc.peak_len)
         if sc.arrival == "nhpp_sine":
             return 1.0 + sc.sine_amp * math.sin(2 * math.pi * t / sc.sine_period)
+        if sc.arrival == "nhpp_steps":
+            n = len(sc.step_rates)
+            return sc.step_rates[min(n - 1, max(0, int(t / self.horizon * n)))]
         return 1.0
 
     def next_arrival(self, t: float, order_rng: random.Random,
@@ -121,10 +138,12 @@ class OrderStream:
         sc, lam = self.sc, self.lam
         if sc.arrival == "poisson":
             return t + order_rng.expovariate(lam), 1
-        if sc.arrival in ("nhpp_peak", "nhpp_sine"):
+        if sc.arrival in ("nhpp_peak", "nhpp_sine", "nhpp_steps"):
             if sc.arrival == "nhpp_peak":
                 base  = (1.0 - sc.peak_mult * sc.peak_len) / max(1e-9, 1.0 - sc.peak_len)
                 f_max = max(sc.peak_mult, base)
+            elif sc.arrival == "nhpp_steps":
+                f_max = max(sc.step_rates)
             else:
                 f_max = 1.0 + sc.sine_amp
             while True:                                         # thinning

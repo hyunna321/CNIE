@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Select-Object ProcessId, @{n='MB';e={[int]\\($_.WorkingSetSize/1MB\\)}}, CreationDate, CommandLine | Format-Table -AutoSize | Out-String -Width 400)",
+      "PowerShell(Stop-Process -Id 8732,35504,25332,34660,26996 -Force -Confirm:$false)",
+      "PowerShell(Get-Process -Id 8732,35504,25332,34660,26996 -EA SilentlyContinue)",
+      "PowerShell(cd C:\\\\COIS\\\\MTSR\\\\CnIE_MTSR_AMR_0.6\\\\revision; $env:PYTHONIOENCODING=\"utf-8\"; $O=\"C:\\\\COIS\\\\MTSR\\\\CnIE_MTSR_AMR_0.6\\\\main\\\\logs_exp\"; $logs = 1..5 | % { \"$O\\\\grid_free_reserve\\\\lam240_M14_K3\\\\recon\\\\recon_s$_.jsonl.gz\" }; python experiments\\\\route_gap.py @logs --M 14 --K 3 --max-calls 50000 --out \"$O\\\\revision_tables\\\\tab_routing_gap\")",
+      "Read(//c/COIS/MTSR/CnIE_MTSR_AMR_0.6/main/**)",
+      "Read(//c/COIS/MTSR/CnIE_MTSR_AMR_0.6/files_v0.7_multi/**)",
+      "Bash(cd \"c:/COIS/MTSR/CnIE_MTSR_AMR_0.6/main/logs_exp/grid_free_reserve/lam240_M14_K3\"; head -3 baselines/eval.csv; echo; head -3 local_r8_ddqn_v2_s1/eval.csv; echo; head -3 local_r8_ddqn_v2_s1_recon/eval.csv; ls; ls ..)",
+      "Read(//c/COIS/MTSR/CnIE_MTSR_AMR_0.6/**)"
+    ]
+  }
+}

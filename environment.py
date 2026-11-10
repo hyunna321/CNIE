@@ -11,6 +11,8 @@
   - "nnh"       : 위 규칙 (기본)
   - "fixed_dock": 도킹 셀 순서(따라서 복귀 WS)를 트립 출발 시 NNH로 정한 뒤 고정, 삽입으로 새 WS가 생기면
                   맨 뒤에 추가 (피킹 셀은 NNH로 다시 구성)
+  - "fixed_return": 복귀 WS(마지막 도킹 셀)만 트립 출발 시 NNH 결과로 고정, 삽입 후에도 맨 뒤 유지
+                  (그 앞의 도킹 셀과 피킹 셀은 NNH로 다시 구성, 새 WS는 복귀 WS 앞에 들름)
 exact(전수 열거 최적 경로, plan_trip_exact)는 closed-loop로 쓰지 않고 오프라인 비교용
   Robot.route_log가 켜져 있으면 경로 구성 호출마다 입력과 NNH 결과 거리·호출 시간을 남기고,
   experiments/route_gap.py가 같은 입력을 exact로 다시 풂
@@ -172,6 +174,8 @@ class Robot:
         self.plan              = deque()     # (틱, 셀) 순서의 예약 경로
         self.replan_pending    = False
         self.pending_insert    = []          # 계획 실패로 아직 경로에 넣지 못한 삽입 토트 위치
+        self.return_dock       = None        # 트립 출발 시 정한 복귀 도킹 셀 (fixed_return에서 유지)
+
     @property
     def stops(self) -> List[Cell]:
         """current_dest 이후 남은 방문 지점 (피킹 셀 -> 도킹 셀)"""
@@ -201,6 +205,12 @@ class Robot:
         if self.route_mode == "fixed_dock" and keep_docks:
             pick_route = nearest_neighbor_route(start, picks, self._md)
             order = [d for d in self.drops if d in docks] + [d for d in docks if d not in self.drops]
+            return pick_route, order, path_distance(start, pick_route + order, self._md)
+        if self.route_mode == "fixed_return" and keep_docks and self.return_dock in docks:
+            pick_route = nearest_neighbor_route(start, picks, self._md)
+            last  = pick_route[-1] if pick_route else start
+            order = nearest_neighbor_route(last, [d for d in docks if d != self.return_dock], self._md) \
+                + [self.return_dock]
             return pick_route, order, path_distance(start, pick_route + order, self._md)
         return plan_trip(start, picks, docks, self._md)
 
@@ -233,6 +243,7 @@ class Robot:
             docks: 하역할 도킹 셀
         """
         self.route, self.drops, _ = self._logged_plan("start", self.pos, picks, docks, keep_docks=False)
+        self.return_dock = self.drops[-1] if self.drops else None   # fixed_return: 출발 시 복귀 WS
         self._set_final_ws()
         self.idle_slots  = self.capacity - len(picks)
         self.is_idle     = False

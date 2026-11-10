@@ -1,7 +1,7 @@
-"""그리드 시뮬레이션 평가 진입점: 배정 정책(BL1~BL6)을 같은 평가 시드로 돌려 비교
+"""그리드 시뮬레이션 평가 진입점: 베이스라인 배정 정책(evaluation.POLICIES)을 같은 테스트 시드로 돌려 비교
 
 사용법:
-    python run.py                              # BL1~BL6, λ=320 주문/hr, M=14, K=3, 평가 시드 20개
+    python run.py                              # 모든 베이스라인, λ=320 주문/hr, M=14, K=3, 테스트 시드 20개
     python run.py --policies BL4 BL6 --lam 280 --robots 18 --n-eval 5
 
     --traffic free|lanes       모든 방향 이동 / 일방통행 통로 + 차선 교차통로 (기본 free)
@@ -19,7 +19,7 @@ import os
 from grid import GridWarehouseLayout
 from scenario import Scenario
 from metrics import MetricsStore, print_comparison
-from evaluation import POLICIES, evaluate_policy, test_seeds
+from evaluation import POLICIES, evaluate_policy, policy_arg, policy_label, test_seeds
 from constant import (
     GRID_TRAFFIC, GRID_MOTION, SIM_TIME, LAMBDA_DEFAULT, DEFAULT_SEED,
     NUM_ROBOTS, NUM_WORKSTATIONS, ROBOT_CAPACITY, N_EVAL, OUT_DIR,
@@ -50,7 +50,8 @@ def evaluate(layout: GridWarehouseLayout, policies, lam: float, num_robots: int,
 def main():
     """명령행 인자로 고른 설정에서 정책 평가"""
     parser = argparse.ArgumentParser(description="MTSR grid simulation")
-    parser.add_argument("--policies", nargs="+", choices=list(POLICIES), default=list(POLICIES))
+    parser.add_argument("--policies", nargs="+", type=policy_arg, default=[k for k in POLICIES if k != "BL8"],
+                        help="정책 키 (evaluation.POLICIES, 별칭 BL7, 매개변수 BL6c<c_d>, <키>@bf)")
     parser.add_argument("--lam", type=float, default=LAMBDA_DEFAULT * 3600, help="주문 도착률 (orders/hr)")
     parser.add_argument("--robots", type=int, default=NUM_ROBOTS, help="로봇 수 M")
     parser.add_argument("--ws", type=int, default=NUM_WORKSTATIONS, help="워크스테이션 수 K")
@@ -93,7 +94,7 @@ def main():
 
     path = os.path.join(out_dir, f"eval_lam{args.lam:.0f}_M{args.robots}_K{args.ws}.csv")
     store.save_csv(path)
-    print_comparison(store, [POLICIES[k][0] for k in args.policies], lam=lam,
+    print_comparison(store, [policy_label(k) for k in args.policies], lam=lam,
                      num_robots=args.robots, last_n=args.n_eval, title="Grid evaluation")
     print(f"저장: {path}")
 

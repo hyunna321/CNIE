@@ -1,4 +1,4 @@
-"""NNH vs exact 경로 비교 (오프라인, 리뷰 R3-6, 논문 tab:routing-gap)
+"""NNH vs exact 경로 비교 (오프라인, 라우팅 오차 분리, 논문 tab:routing-gap. runner.py routing --stage recon이 호출)
 
 입력: run_rl.py --log-reconstructions PATH가 남긴 JSONL (.gz 가능). 한 줄 = NNH 경로 구성 호출 1번
       {"seed", "i", "kind" ("start" 트립 출발 / "reroute" 운행 중 재구성), "start", "picks", "docks",
@@ -15,7 +15,7 @@
               ms_nnh_mean/p95, ms_exact_mean/p95 (같은 조건 측정), ms_nnh_sim_mean/p95 (시뮬레이션 중)
 
 사용법:
-    python experiments/route_gap.py logs_exp/.../recon_s1.jsonl.gz ... --M 14 --K 3 --out logs_exp/.../tab_routing_gap
+    python experiments/route_gap.py logs_exp/.../recon/recon_s1.jsonl.gz ... --M 14 --K 3 --out logs_exp/tables/tab_routing_gap
     --max-calls N : 파일당 무작위 표본 N개 (0이면 전부, 표본 수는 n_calls / n_calls_logged로 남음)
 """
 import argparse

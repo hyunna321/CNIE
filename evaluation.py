@@ -1,14 +1,16 @@
-"""정책 평가 하네스: 베이스라인(BL1~BL6, Greedy_R)과 RL 체크포인트를 같은 함수, 같은 시드 규칙으로 평가
+"""정책 평가 하네스: 베이스라인과 RL 체크포인트를 같은 함수, 같은 시드 규칙으로 평가
+
+정책 등록 (POLICIES): 키 → (결과 라벨, 시뮬레이터 생성 함수). 새 베이스라인은 여기에 한 줄 추가하면
+  run.py, run_rl.py --baselines, experiments/runner.py, 뷰어에서 모두 쓸 수 있음
 
 시드 구간 (constant.py, 서로 겹치지 않음)
   - 학습 에피소드: TRAIN_SEED_BASE + 학습 시드 × TRAIN_SEED_STRIDE + 에피소드 번호
-  - 검증 (체크포인트 선택/튜닝): VAL_SEED_BASE + i
-  - 최종 테스트 (보고): EVAL_SEED_BASE + i
+  - 검증 (체크포인트·베이스라인 선택): VAL_SEED_BASE + i
+  - 최종 테스트 (보고): EVAL_SEED_BASE + i — 모든 정책·학습 시드가 같은 테스트 인스턴스 (대응 비교)
 모든 평가 결과는 EpisodeResult.seed에 주문 생성 시드를 남기고, episode = 시드 리스트 인덱스
 
 평가 조건 (Condition): 이동 가정(traffic, motion)과 경로 구성 규칙(route)
-  - 결과 폴더 이름 setting = grid_{traffic}_{motion}[_sc해시][_route-fixeddock]
-  - 기본 조건(route = nnh)이면 기존 이름 그대로 (grid_free_reserve 등)
+  - 결과 폴더 이름 setting = grid_{traffic}_{motion}[_sc해시][_route-{규칙}]  (route = nnh이면 꼬리표 없음)
 """
 import gzip
 import hashlib
@@ -16,30 +18,37 @@ import json
 import os
 import time
 from dataclasses import asdict, dataclass
+from functools import partial
 from typing import Dict, List, Optional
 
 from metrics import MetricsStore
 from baselines import (FullBufferSimulator, FillBufferSimulator, PartialSimulator, RandomAssignSimulator,
                        NearestRobotSimulator, MinInsertionSimulator, MarginalCostSimulator,
-                       GreedyRewardSimulator)
+                       GreedyRewardSimulator, OrderPlannedSimulator)
 from constant import (
     SIM_TIME, PARTIAL_K, EVAL_SEED_BASE, VAL_SEED_BASE, TRAIN_SEED_BASE, TRAIN_SEED_STRIDE,
     GRID_TRAFFIC, GRID_MOTION, DEFAULT_SEED, ROBOT_CAPACITY,
 )
 
-# 정책 키 -> (라벨, 시뮬레이터 클래스)
+# 정책 키 -> (라벨, 시뮬레이터 생성 함수 (layout, **SimulatorBase 인자))
 POLICIES = {
-    "BL1": ("BL1_FullBuffer",          FullBufferSimulator),
-    "BL1F": ("BL1F_FillBuffer",        FillBufferSimulator),
-    "BL2": (f"BL2_Partial_k{PARTIAL_K}", PartialSimulator),
-    "BL3": ("BL3_Random",              RandomAssignSimulator),
-    "BL4": ("BL4_Nearest",             NearestRobotSimulator),
-    "BL5": ("BL5_MinInsertion",        MinInsertionSimulator),
-    "BL6": ("BL6_MarginalCost",        MarginalCostSimulator),
-    "GR":  ("Greedy_R",                GreedyRewardSimulator),
+    "BL1":   ("BL1_FullBuffer",          FullBufferSimulator),
+    "BL1F":  ("BL1F_FillBuffer",         FillBufferSimulator),
+    "BL2":   (f"BL2_Partial_k{PARTIAL_K}", PartialSimulator),
+    "BL3":   ("BL3_Random",              RandomAssignSimulator),
+    "BL4":   ("BL4_Nearest",             NearestRobotSimulator),
+    "BL5":   ("BL5_MinInsertion",        MinInsertionSimulator),
+    "BL6":   ("BL6_MarginalCost",        MarginalCostSimulator),
+    "BL6D0": ("BL6_MarginalCost_cd0",    partial(MarginalCostSimulator, cost_dist=0.0)),   # 거리비용 c_d = 0
+    "GR":    ("Greedy_R",                GreedyRewardSimulator),
+    "BL8":   ("BL8_OrderPlanned",        OrderPlannedSimulator),
 }
-# 논문 번호 BL7 = Greedy_R (정책 키 GR)
-POLICY_ALIASES = {"BL7": "GR"}
+# 논문 번호 BL7 = Greedy_R (정책 키 GR), BL6c0 = BL6D0, BL6c1 = BL6
+POLICY_ALIASES = {"BL7": "GR", "BL6c0": "BL6D0", "BL6c1": "BL6"}
+# 매개변수 키 (resolve_policy)
+#   BL6c{c}      : BL6에서 c_d = c (라벨 BL6_MarginalCost_cd{c}), 예: BL6c0.25. BL6* 튜닝 격자 constant.BL6_CD_GRID
+#   {키}@bf      : 주문 내 토트 배정 순서 bottleneck_first (라벨 뒤 _bf), 예: BL6@bf, BL6c0.5@bf, BL8@bf
+BF_SUFFIX = "@bf"
 
 
 @dataclass
@@ -47,11 +56,11 @@ class Condition:
     """평가 조건 (이동 가정 + 경로 구성 규칙). 기본값 = 본실험 조건"""
     traffic: str = GRID_TRAFFIC
     motion:  str = GRID_MOTION
-    route:   str = "nnh"          # 경로 구성 규칙 (environment 모듈 설명, "nnh" / "fixed_dock")
+    route:   str = "nnh"          # 경로 구성 규칙 (constant.ROUTE_MODES, environment 모듈 설명)
 
     @property
     def sim_kw(self) -> Dict:
-        """SimulatorBase 추가 인자 (기본이면 빈 dict라 기존 호출과 같음)"""
+        """SimulatorBase 추가 인자 (기본이면 빈 dict)"""
         return {"route": self.route} if self.route != "nnh" else {}
 
     @property
@@ -78,8 +87,45 @@ class Condition:
 
 
 def policy_key(key: str) -> str:
-    """논문 번호 별칭(BL7)을 POLICIES 키로"""
-    return POLICY_ALIASES.get(key, key)
+    """별칭(BL7, BL6c0, BL6c1)을 POLICIES 키로 (@bf 꼬리표는 유지)"""
+    base, bf = (key[:-len(BF_SUFFIX)], BF_SUFFIX) if key.endswith(BF_SUFFIX) else (key, "")
+    return POLICY_ALIASES.get(base, base) + bf
+
+
+def resolve_policy(key: str):
+    """정책 키 → (라벨, 시뮬레이터 생성 함수). 등록 키, 별칭, 매개변수 키(모듈 상단 설명) 지원"""
+    key = policy_key(key)
+    bf = key.endswith(BF_SUFFIX)
+    base = key[:-len(BF_SUFFIX)] if bf else key
+    if base in POLICIES:
+        label, factory = POLICIES[base]
+    elif base.startswith("BL6c"):
+        try:
+            c = float(base[4:])
+        except ValueError:
+            raise KeyError(key)
+        label, factory = f"BL6_MarginalCost_cd{c:g}", partial(MarginalCostSimulator, cost_dist=c)
+    else:
+        raise KeyError(key)
+    if bf:
+        label, factory = label + "_bf", partial(factory, tote_order="bottleneck_first")
+    return label, factory
+
+
+def policy_arg(key: str) -> str:
+    """argparse type: 해석할 수 있는 정책 키인지 확인"""
+    import argparse
+    try:
+        resolve_policy(key)
+    except KeyError:
+        raise argparse.ArgumentTypeError(f"알 수 없는 정책 키 {key} (등록 키: {', '.join(POLICIES)}, "
+                                         f"별칭: {', '.join(POLICY_ALIASES)}, 매개변수: BL6c<c_d>, <키>@bf)")
+    return key
+
+
+def policy_label(key: str) -> str:
+    """정책 키의 결과 라벨"""
+    return resolve_policy(key)[0]
 
 
 def test_seeds(n: int) -> List[int]:
@@ -88,7 +134,7 @@ def test_seeds(n: int) -> List[int]:
 
 
 def val_seeds(n: int) -> List[int]:
-    """검증 시드 n개 (체크포인트 선택/튜닝 전용)"""
+    """검증 시드 n개 (체크포인트·베이스라인 선택 전용)"""
     return list(range(VAL_SEED_BASE, VAL_SEED_BASE + n))
 
 
@@ -99,7 +145,7 @@ def train_episode_seed(train_seed: int, episode: int) -> int:
 
 
 def make_sim(policy: str, layout, lam: float, seed: int, sim_time: float = SIM_TIME,
-             agent=None, reward_mode: str = "smdp", sim_kw: Optional[Dict] = None):
+             agent=None, arm=None, sim_kw: Optional[Dict] = None):
     """정책 키로 시뮬레이터 생성 (로봇 수/용량은 layout을 따름)
 
     입력:
@@ -108,17 +154,16 @@ def make_sim(policy: str, layout, lam: float, seed: int, sim_time: float = SIM_T
         lam: 주문 도착률 (orders/s)
         seed: 주문 생성 시드
         sim_time: 시뮬레이션 시간 (s)
-        agent: policy == "RL"일 때 DQNAgent
-        reward_mode: RL 보상 기록 방식 (정책 선택에는 영향 없음)
-        sim_kw: 시뮬레이터 추가 인자 (Condition.sim_kw의 route, RL이면 RLSimulator 인자도 가능)
+        agent, arm: policy == "RL"일 때 DQNAgent와 보상 설정 (arm은 기록되는 reward에만 영향)
+        sim_kw: 시뮬레이터 추가 인자 (Condition.sim_kw의 route)
     """
     kw = dict(lam=lam, seed=seed, sim_time=sim_time,
               num_robots=layout.num_robots, robot_capacity=layout.robot_capacity, **(sim_kw or {}))
     if policy == "RL":
         from rl_simulator import RLSimulator
         assert agent is not None, "RL 평가에는 agent가 필요합니다"
-        return RLSimulator(layout, agent, eval_mode=True, reward_mode=reward_mode, **kw)
-    return POLICIES[policy_key(policy)][1](layout, **kw)
+        return RLSimulator(layout, agent, eval_mode=True, arm=arm, **kw)
+    return resolve_policy(policy)[1](layout, **kw)
 
 
 def _write_reconstructions(path: str, seed: int, log: list):
@@ -137,8 +182,7 @@ def _write_reconstructions(path: str, seed: int, log: list):
 
 def evaluate_policy(layout, policy: str, lam: float, seeds: List[int],
                     sim_time: float = SIM_TIME, label: Optional[str] = None,
-                    agent=None, reward_mode: str = "smdp",
-                    store: Optional[MetricsStore] = None,
+                    agent=None, arm=None, store: Optional[MetricsStore] = None,
                     track_decisions: bool = True, verbose: bool = True,
                     sim_kw: Optional[Dict] = None, log_reconstructions: Optional[str] = None) -> MetricsStore:
     """정책 하나를 시드마다 한 번씩 실행해 기록 (RL은 ε = 0)
@@ -150,7 +194,7 @@ def evaluate_policy(layout, policy: str, lam: float, seeds: List[int],
         seeds: 주문 생성 시드 리스트 (test_seeds / val_seeds)
         sim_time: 시뮬레이션 시간 (s)
         label: 결과 라벨 (None이면 POLICIES 라벨, RL은 "RL")
-        agent, reward_mode: RL 전용 (make_sim 참고)
+        agent, arm: RL 전용 (make_sim 참고)
         store: 결과를 추가할 MetricsStore (None이면 새로 만듦)
         track_decisions: RL이면 DecisionStats로 BL6 argmin 일치율 기록
         verbose: 시드별 한 줄 출력
@@ -161,10 +205,10 @@ def evaluate_policy(layout, policy: str, lam: float, seeds: List[int],
         결과가 담긴 MetricsStore
     """
     if label is None:
-        label = "RL" if policy == "RL" else POLICIES[policy_key(policy)][0]
+        label = "RL" if policy == "RL" else policy_label(policy)
     store = store if store is not None else MetricsStore()
     for i, s in enumerate(seeds):
-        sim = make_sim(policy, layout, lam, s, sim_time, agent=agent, reward_mode=reward_mode, sim_kw=sim_kw)
+        sim = make_sim(policy, layout, lam, s, sim_time, agent=agent, arm=arm, sim_kw=sim_kw)
         stats = None
         if policy == "RL" and track_decisions:
             from viewer.recorder import DecisionStats
@@ -184,6 +228,7 @@ def evaluate_policy(layout, policy: str, lam: float, seeds: List[int],
         if stats is not None:
             summ = stats.summary()
             r.n_decisions, r.bl6_agree = summ["n_decisions"], summ["agree"]
+            r.agree_cd0, r.agree_bl8, r.cd_reproducible = summ["agree_cd0"], summ["agree_bl8"], summ["cd_reproducible"]
         store.add(r)
         if verbose:
             agree = f", BL6 일치 {r.bl6_agree:.3f}" if stats is not None else ""
@@ -199,7 +244,7 @@ def evaluate_baselines_cached(layout, policies: List[str], lam: float, seeds: Li
     입력:
         layout, lam, seeds, sim_time, sim_kw: evaluate_policy와 같음 (path는 같은 조건의 폴더여야 함)
         policies: POLICIES 키 리스트
-        path: 결과 CSV (같은 설정의 baselines/eval.csv)
+        path: 결과 CSV (같은 셀의 baselines/eval.csv 또는 val.csv)
     출력:
         요청한 정책 × 시드 결과만 담은 MetricsStore (episode = seeds 인덱스)
     """
@@ -207,12 +252,12 @@ def evaluate_baselines_cached(layout, policies: List[str], lam: float, seeds: Li
     have = {(r.label, r.seed): r for r in old.records
             if r.seed >= 0 and abs(r.sim_time - sim_time) < 1e-6}
     for key in policies:
-        label = POLICIES[policy_key(key)][0]
+        label = policy_label(key)
         todo  = [s for s in seeds if (label, s) not in have]
         if todo:
             for r in evaluate_policy(layout, key, lam, todo, sim_time, sim_kw=sim_kw).records:
                 have[(label, r.seed)] = r
-    # 시뮬레이션 시간이 다른 행은 그대로 두고, 시드 기록이 없는 옛 형식 행은 버림
+    # 시뮬레이션 시간이 다른 행은 그대로 둠
     merged = MetricsStore()
     for r in old.records:
         if r.seed >= 0 and abs(r.sim_time - sim_time) >= 1e-6:
@@ -224,7 +269,7 @@ def evaluate_baselines_cached(layout, policies: List[str], lam: float, seeds: Li
     out = MetricsStore()
     for key in policies:
         for i, s in enumerate(seeds):
-            r = have[(POLICIES[policy_key(key)][0], s)]
+            r = have[(policy_label(key), s)]
             r.episode = i
             out.add(r)
     return out

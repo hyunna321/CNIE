@@ -52,6 +52,13 @@ class EpisodeResult:
     decision_full_ms_mean:  float = 0.0   # ms, 선택 + 배정·경로 재계획(예약표) 포함
     decision_full_ms_p95:   float = 0.0
     wall_s:                 float = 0.0   # s, 에피소드 1회 실행 시간 (학습이면 업데이트 포함)
+    flow_p99:               float = 0.0   # s, 완료 주문 흐름시간 99백분위 (nearest-rank)
+    utilization:            float = 0.0   # 가동률 = 운행 중(idle 아님) 로봇 시간 / (M · 시뮬레이션 시간)
+    idle_at_decision:       float = 0.0   # 결정 가능한 토트 도착 시점(후보 ≥ 1)의 평균 idle 로봇 수
+    # RL 평가 결정 분류 (viewer.recorder.DecisionStats, 그림 6 재분석)
+    agree_cd0:              float = float("nan")   # 선택 = BL6(c_d = 0) argmin 비율
+    agree_bl8:              float = float("nan")   # 선택 = BL8 argmin 비율
+    cd_reproducible:        float = float("nan")   # 어떤 c_d ≥ 0의 BL6 argmin으로도 재현되는 결정 비율
 
     @property
     def decision_rate(self) -> float:
@@ -157,7 +164,7 @@ class TrainingPoint:
     sim_s:         float = 0.0 # s, 그중 시뮬레이션 (결정 추론 포함)
     n_updates:     int = 0     # 이 에피소드의 train_step 호출 수
     lam:           float = float("nan")   # orders/hr, 이 에피소드의 주문 도착률 (커리큘럼)
-    alpha:         float = float("nan")   # 에피소드 끝 잔차 계수 α (GlobalDQNAgent)
+    alpha:         float = float("nan")   # 에피소드 끝 잔차 계수 α (agents.ScoreNet)
     q_mean:        float = float("nan")   # 이 에피소드 업데이트들의 평균 Q (배치 평균)
     td_abs:        float = float("nan")   # 이 에피소드 업데이트들의 평균 |TD 오차|
     local_mu:      float = float("nan")   # s, local 보상 기준점 μ
@@ -200,6 +207,7 @@ METRIC_DISPLAY = {
     "completion_rate":      (True,  "Completion Rate"),
     "avg_flow_time":        (False, "Avg Flow Time (s)"),
     "avg_flow_time_censored": (False, "Avg Flow Time, censored (s)"),
+    "flow_p99":             (False, "Flow Time p99 (s)"),
     "avg_wait_time":        (False, "Avg Wait Time (s)"),
     "decision_rate":        (True,  "Decision Rate"),
     "dist_per_order":       (False, "Dist/Order (m)"),
@@ -207,6 +215,8 @@ METRIC_DISPLAY = {
     "avg_totes_per_trip":   (True,  "Totes/Trip"),
     "mid_trip_rate":        (True,  "Mid-Trip Rate"),
     "saving_per_insertion": (True,  "Saving/Insertion (m)"),
+    "utilization":          (False, "Utilization"),
+    "idle_at_decision":     (True,  "Idle Robots at Decision"),
 }
 
 # 코드 라벨 -> 논문 표기 (라벨 자체는 바꾸지 않고 비교표/분석 표에서만 사용)

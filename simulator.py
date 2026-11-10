@@ -20,7 +20,7 @@ from reservation import ReservationTable, plan_leg
 from metrics import EpisodeResult
 from constant import (
     SIM_TIME, ROBOT_SPEED, DEFAULT_SEED, CELL_SIZE,
-    GRID_REPLAN_WAIT, GRID_DETOUR_MAX_EXTRA, GRID_DEADLOCK_TICKS, ROUTE_MODES,
+    GRID_REPLAN_WAIT, GRID_DETOUR_MAX_EXTRA, GRID_DEADLOCK_TICKS, ROUTE_MODES, TOTE_ORDERS,
 )
 
 Cell = Tuple[int, int]
@@ -310,13 +310,14 @@ class SimulatorBase:
       - "reserve": 로봇의 경로가 바뀔 때(배정, 삽입, 재출발) 그 로봇의 트립 전체를
         시공간 경로로 계획해 예약표에 올리고, 매 틱 예약대로 이동 (_reserve_plan)
 
-    리비전 평가 옵션 (기본값이면 기존 동작과 같음)
-    - route: 경로 구성 규칙 (environment 모듈 설명, "nnh" / "fixed_dock"). _insertion_delta도 같은 규칙
+    평가 옵션 (라우팅 오차 분리용, 기본값이면 동작 변화 없음)
+    - route: 경로 구성 규칙 (constant.ROUTE_MODES, environment 모듈 설명). _insertion_delta도 같은 규칙
     - log_routes(): 로봇의 NNH 경로 구성 호출을 기록 (NNH–exact 오프라인 비교용, 동작에는 영향 없음)
     """
 
     def __init__(self, layout: GridWarehouseLayout, lam: float, seed: int,
-                 sim_time: float, num_robots: int, robot_capacity: int, route: str = "nnh"):
+                 sim_time: float, num_robots: int, robot_capacity: int, route: str = "nnh",
+                 tote_order: str = "arrival"):
         """
         입력:
             layout: GridWarehouseLayout
@@ -326,9 +327,13 @@ class SimulatorBase:
             num_robots: 로봇 수
             robot_capacity: 로봇 용량 (토트)
             route: 경로 구성 규칙 ROUTE_MODES (기본 "nnh")
+            tote_order: 주문 내 토트 배정 순서 TOTE_ORDERS. "arrival" (기본, 주문 생성 순서) /
+                        "bottleneck_first" (도착 시 토트마다 min_m Ť_{k,m}을 구해 큰 것부터, planning.tote_completion)
         """
         assert route in ROUTE_MODES, route
+        assert tote_order in TOTE_ORDERS, tote_order
         self.route_mode       = route
+        self.tote_order       = tote_order
         self.layout           = layout
         self.lam              = lam
         self.seed             = seed
@@ -367,6 +372,9 @@ class SimulatorBase:
         self._plan_time          = 0.0
         self._lat_sel:  List[float] = []   # s, 결정별 선택 지연 (후보 탐색 ~ 로봇 선택)
         self._lat_full: List[float] = []   # s, 결정별 전체 지연 (선택 + 배정·경로 재계획)
+        self._busy_time  = 0.0             # robot·s, 운행 중(idle 아님) 로봇 시간 적분 (가동률)
+        self._idle_sum   = 0                # 결정 가능한 토트 도착 시점의 idle 로봇 수 합
+        self._idle_n     = 0                # 그 도착 수
 
     def _build_robots(self) -> List[Robot]:
         """로봇 생성 및 워크스테이션에 라운드로빈으로 초기 배치
@@ -452,7 +460,10 @@ class SimulatorBase:
             order.ws_id = self._choose_ws(order)
             self._ws_load[order.ws_id] += len(order.totes)
             self._n_in_system += 1
-            for tote in order.totes:
+            for tote in self._tote_sequence(order):
+                if self._eligible_robots():
+                    self._idle_sum += sum(r.is_idle for r in self.robots)
+                    self._idle_n   += 1
                 self._on_tote_arrival(tote)
         nxt, n = self.order_mgr.next_arrival(self.now)
         if nxt <= self.sim_time:
@@ -468,11 +479,23 @@ class SimulatorBase:
         """
         if t > self.now:
             n_busy = sum(1 for r in self.robots if not r.is_idle)
+            self._busy_time += n_busy * (t - self.now)
             self._on_interval(self.now, t, self._n_in_system, n_busy)
         self.now = t
 
+    def _tote_sequence(self, order: Order) -> List[Tote]:
+        """주문 도착 시 토트를 정책에 넘기는 순서 (tote_order, __init__ 설명). 후보가 없으면 생성 순서"""
+        if self.tote_order == "arrival" or len(order.totes) < 2:
+            return order.totes
+        eligible = self._eligible_robots()
+        if not eligible:
+            return order.totes
+        from planning import tote_completion
+        key = {t.tote_id: min(tote_completion(self, t, r) for r in eligible) for t in order.totes}
+        return sorted(order.totes, key=lambda t: -key[t.tote_id])
+
     def _on_interval(self, t0: float, t1: float, n_in_system: int, n_busy: int):
-        """사건 사이 구간 [t0, t1] 훅 (RL 비용 적분용). 기본 구현은 no-op
+        """사건 사이 구간 [t0, t1] 훅 (RLSimulator가 보상 객체에 전달, 구간 적분형 보상용). 기본 구현은 no-op
 
         입력:
             t0, t1: 구간 시작/끝 시각 (s)
@@ -542,7 +565,7 @@ class SimulatorBase:
         """로봇에 토트를 넣을 때 늘어나는 이동거리 (m)
 
         삽입 후 경로 = 현재 목적지 유지 + (남은 피킹 셀 + 새 토트 위치) NNH + (필요 도킹 셀 + 새 토트 WS) NNH
-        (route="fixed_dock"이면 Robot._plan의 같은 규칙: 남은 도킹 순서 유지 + 새 WS는 맨 뒤)
+        (route가 nnh가 아니면 Robot._plan의 같은 규칙, environment 모듈 설명)
         idle 로봇은 현재 위치에서 출발하는 새 트립 전체 거리
 
         입력:
@@ -719,7 +742,18 @@ class SimulatorBase:
             decision_ms_p95      = sel_p95,
             decision_full_ms_mean = full_mean,
             decision_full_ms_p95 = full_p95,
+            flow_p99             = self._quantile([f for _, f in self._completions], 0.99),
+            utilization          = self._busy_time / max(1e-9, self.num_robots * self.now),
+            idle_at_decision     = self._idle_sum / self._idle_n if self._idle_n else 0.0,
         )
+
+    @staticmethod
+    def _quantile(xs: List[float], q: float) -> float:
+        """nearest-rank 분위수 (비어 있으면 0)"""
+        if not xs:
+            return 0.0
+        s = sorted(xs)
+        return s[min(len(s) - 1, int(math.ceil(q * len(s))) - 1)]
 
     # 이동 엔진
 

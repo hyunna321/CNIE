@@ -64,9 +64,7 @@ class Recorder:
         self.agreement.on_rl_decision(sim, tote, eligible, cand_feats, idx, deltas)
         if not self.record_decisions:
             return
-        import torch
-        with torch.no_grad():
-            q = sim.agent.policy_net(torch.tensor(cand_feats)).numpy().reshape(-1)
+        q  = sim.agent.q_values(cand_feats)
         mc = self.agreement.last_mc
         self.decisions.append({
             "t": round(sim.now, 2), "tote": tote.tote_id, "order": tote.order.order_id,
@@ -169,6 +167,7 @@ class DecisionStats:
         self.regret = 0.0                       # Σ (선택 후보 한계비용 − 최소 한계비용), tote·s
         self.n_cands = 0
         self.last_mc: List[float] = []
+        self.agree_cd0 = self.agree_bl8 = self.cd_repro = 0
 
     def on_reset(self, sim):
         self._clear()
@@ -192,6 +191,31 @@ class DecisionStats:
         if eligible[int(np.argmin(mc))].is_idle:
             self.n_idle     += 1
             self.agree_idle += hit
+        # 그림 6 재분석: mc_c(m) = A_m + c · Δd_m (A = c_d = 0 한계비용)
+        A = [bl6_marginal_cost(sim, r, d, 0.0) for r, d in zip(eligible, deltas)]
+        self.agree_cd0 += A[idx] - min(A) < self.tie_tol
+        self.cd_repro  += self._cd_reproducible(A, deltas, idx)
+        from planning import planned_completions, delta_order
+        pc = planned_completions(sim, "estimate")
+        D  = [delta_order(sim, tote, r, pc)[0] for r in eligible]
+        ties = [i for i, x in enumerate(D) if x - min(D) < self.tie_tol]
+        self.agree_bl8 += idx in ties and mc[idx] - min(mc[i] for i in ties) < self.tie_tol
+
+    def _cd_reproducible(self, A, deltas, idx) -> bool:
+        """어떤 c ≥ 0에서 idx가 argmin_m (A_m + c Δd_m)인지 (1차원 구간 교집합)"""
+        lo, hi = 0.0, float("inf")
+        for m, (a_m, d_m) in enumerate(zip(A, deltas)):
+            if m == idx:
+                continue
+            a, b = deltas[idx] - d_m, a_m - A[idx] + self.tie_tol
+            if abs(a) < 1e-12:
+                if b < 0:
+                    return False
+            elif a > 0:
+                hi = min(hi, b / a)
+            else:
+                lo = max(lo, b / a)
+        return lo <= hi
 
     def summary(self) -> dict:
         """결정 수, 일치율 (전체 / BL6 argmin이 idle·mid-trip인 결정), 결정당 평균 regret, 평균 후보 수"""
@@ -204,4 +228,7 @@ class DecisionStats:
             "agree_mid":   (self.agree - self.agree_idle) / n_mid if n_mid else nan,
             "regret_mc":   self.regret / self.n if self.n else nan,
             "avg_cands":   self.n_cands / self.n if self.n else nan,
+            "agree_cd0":   self.agree_cd0 / self.n if self.n else nan,
+            "agree_bl8":   self.agree_bl8 / self.n if self.n else nan,
+            "cd_reproducible": self.cd_repro / self.n if self.n else nan,
         }

@@ -101,76 +101,130 @@
 
 ## 5. 배정 정책
 
-| 정책 | 규칙 | 운행 중 삽입 |
-|---|---|---|
-토트마다 로봇을 고름 (WS는 이미 정해져 있음)
+토트마다 로봇을 고름 (WS는 이미 정해져 있음). 정책 등록은 `evaluation.POLICIES` (키 → 결과 라벨, 시뮬레이터 생성 함수)
 
-| 정책 | 규칙 | 운행 중 삽입 |
-|---|---|---|
-| BL1 Full-Buffer | idle 로봇에 토트가 용량만큼 쌓이면 출발 | X |
-| BL2 Partial-Buffer | idle 로봇에 토트가 partial_k개 쌓이면 출발 | X |
-| BL3 Random | 후보 중 무작위 | O |
-| BL4 Nearest | 토트 위치에 가장 가까운 로봇 | O |
-| BL5 Min-Insertion | 추가 이동거리 최소 (하역 WS 추가 포함) | O |
-| BL6 Marginal-Cost | (실은 토트 지연 + 새 토트 남은 시간 + c_d · 추가 거리) 최소. 토트 단위 근사, 주문 완료가 마지막 토트에 달린 점은 미반영 | O |
-| BL7 Greedy_R (키 `GR`, 별칭 `BL7`) | legacy 보상 즉시값 최대 | O |
+| 키 | 라벨 | 규칙 | 운행 중 삽입 |
+|---|---|---|---|
+| BL1 | `BL1_FullBuffer` | 빈 슬롯이 가장 많은 idle 로봇에 쌓고 용량만큼 차면 출발 | X |
+| BL1F | `BL1F_FillBuffer` | BL1과 같지만 이미 쌓기 시작한 idle 로봇부터 채움 | X |
+| BL2 | `BL2_Partial_k3` | idle 로봇에 토트가 partial_k개 쌓이면 출발 | X |
+| BL3 | `BL3_Random` | 후보 중 무작위 | O |
+| BL4 | `BL4_Nearest` | 토트 위치에 가장 가까운 로봇 | O |
+| BL5 | `BL5_MinInsertion` | 추가 이동거리 최소 (하역 WS 추가 포함) | O |
+| BL6 | `BL6_MarginalCost` | (실은 토트 지연 + 새 토트 남은 시간 + c_d · 추가 거리) 최소, c_d = 1. 토트 단위 근사, 주문 완료가 마지막 토트에 달린 점은 미반영 | O |
+| BL6D0 | `BL6_MarginalCost_cd0` | BL6에서 c_d = 0 | O |
+| GR (별칭 BL7) | `Greedy_R` | legacy 보상 즉시값 최대 | O |
+| BL8 | `BL8_OrderPlanned` | Delta_order(k, m) 최소 (주문 계획 완료시각 증가 합, `planning.py`), 동률이면 BL6 한계비용 | O |
+
+- 매개변수 키 (`evaluation.resolve_policy`): `BL6c<c_d>` = BL6에서 c_d만 바꿈 (예: `BL6c0.25`, 라벨 `BL6_MarginalCost_cd0.25`), `<키>@bf` = 주문 내 토트 배정 순서 bottleneck_first (라벨 뒤 `_bf`)
+- BL6\* = 셀마다 검증 시드 10개로 c_d ∈ {0, 0.25, 0.5, 1, 2} 중 최선 (tote_order마다 따로, `experiments/stages.py stage0`, select.json `bl6_star`)
 
 - 논문 표기 (`metrics.PAPER_NAMES`, 라벨은 그대로): `BL1F_FillBuffer` → BL1, `BL1_FullBuffer` → BL1-Spread, `Greedy_R` → BL7
+- 새 베이스라인
+  - 삽입형: `baselines.InsertionSimulator`를 상속해 `_select_robot`만 구현
+  - 기존 규칙의 매개변수 변형: `functools.partial`로 등록 (예: BL6D0 = `partial(MarginalCostSimulator, cost_dist=0.0)`)
+  - `POLICIES`에 한 줄 추가하면 `run.py`, `run_rl.py --baselines`, 실험 실행기, 뷰어에서 모두 사용 가능
+  - 셀마다 테스트할 목록은 `experiments/design.py`의 `ALL_KEYS`, 기준 선택 후보는 `SELECT_KEYS`
 
 ## 6. RL 배정
 
-> MDP 정식화는 바뀔 수 있음. 바뀌면 이 절 전체 재작성
-
-- **arm** (`run_rl.ARMS`) = 보상 모드 × 업데이트 비율 × 특징 세트
-
-  | arm | 보상 | 업데이트 | 특징 |
-  |---|---|---|---|
-  | `smdp_u1_base` | smdp | 에피소드당 1회 | base |
-  | `smdp_r8_base` | smdp | 결정 8개당 1회 | base |
-  | `smdp_r8_bl6` (기본) | smdp | 결정 8개당 1회 | bl6 |
-  | `legacy_r8_base` | legacy | 결정 8개당 1회 | base |
-  | `legacy_r8_bl6` | legacy | 결정 8개당 1회 | bl6 |
+> 보상 설계를 바꿀 예정. 바뀌면 보상 항목과 arm 표를 다시 쓸 것
 
 - **결정 시점**: 토트 도착 (주문 도착 시 그 주문의 토트마다 1번)
   - 한 주문의 토트들은 같은 시각의 연속 결정, 그 사이 τ = 0
   - 후보가 1대 이상일 때만 결정, 없으면 토트를 대기 큐에 넣음
   - 대기 큐에서 꺼내 배정하는 경우(트립 완료 시 FIFO)는 결정 아님
 - **행동**: 후보 로봇(`_eligible_robots`) 내 인덱스. 행동 공간 = 후보 로봇
-  - 후보마다 Q값을 추정해 Q값이 가장 큰 로봇에 배정
-- **상태**: (토트, 후보 로봇) 쌍마다 특징 벡터, 같은 MLP로 후보마다 Q값 (`agents.DQNAgent.build_candidates`)
-  - base (용량 5이면 22차원)
-    - 토트 상대좌표 2: 토트 피킹 셀 − 후보 로봇의 트립 마지막 WS 도킹 셀, `coord_norm`으로 정규화
-    - 삽입 detour 1: `_insertion_delta` (idle이면 새 트립 전체 거리)
-    - 로봇 상태 5 + 용량×2 (`Robot.state_vector`): 위치(마지막 WS 기준), 빈 슬롯 비율, idle 여부, 남은 이동시간, 남은 피킹 셀 좌표
-    - 컨텍스트 4 (후보 공통 전역 상태): 대기 큐 길이 / (M·C), 경과시간 / sim_time, 시스템 내 주문 수 / (M·C) (상한 5), 운행 로봇 수 / M
-  - bl6 = base + 5 (27차원): BL6 한계비용 구성요소 (적재 토트 비율, 적재 토트 지연, 배정 후 남은 거리, 추가 이동거리, 한계비용 합계)
-  - 주문 단위 정보(같은 주문의 다른 토트가 어디에 배정됐는지)는 없음
-- **보상** (`rl_simulator`)
-  - legacy: exp(−α · Δd / D_max) − γ_q · 큐 압박 − 마지막 빈 idle 로봇 소진 페널티
+- **에이전트** (`agents.DQNAgent`, 모든 arm 공통): 전역 상태 + BL6 잔차 Double DQN, dueling 없음
+  - Q_i = α · f([φ_i, s]) − k · mc_i
+    - φ_i: (토트, 후보 i) 특징 27차원 (용량 5)
+      - 토트 상대좌표 2, 삽입 detour 1, 로봇 상태 5 + 용량×2 (`Robot.state_vector`)
+      - 컨텍스트 4: 대기 큐 길이 / (M·C), 경과시간 / sim_time, 시스템 내 주문 수 / (M·C) (상한 5), 운행 로봇 수 / M
+      - BL6 한계비용 구성요소 5 (마지막 = 한계비용 합계 mc_i)
+    - s = enc([mean φ(R), max φ(R), W]): 전 로봇 특징 집합 R (로봇당 10) + WS 상태·토트 WS·컨텍스트 W (`RLSimulator._global_state`)
+    - k = mc_scale = dist_norm / v / Z (Z = 1000) → 학습 시작 시 argmax = BL6 (f 마지막 층 0 초기화)
+    - α = sigmoid 방식으로 (0, 1) 범위, 초기값 0.1
+  - PER, 3-step, Huber 손실, ε = 0.05 고정, 결정 8개당 업데이트 1회
+  - 앞쪽 절반 에피소드는 λ ∈ [0.7λ, λ] 커리큘럼
+- **보상** (`rewards.py`)
+  - local (제안): 결정 k의 국소 비용 = 자기 토트 지연 (WS 처리 완료 − 결정 시각) + w_ext · 탑재 토트 지연 추정 (n_onboard · Δd / v) + w_q · 직후 큐잉 토트 지연, 보상 = −(비용 − μ(λ)) / 1000
+    - μ(λ): 학습 전 BL6 prior로 [0.7λ, λ] 5점 × 10 에피소드 롤아웃 → 셀 폴더 `local_mu*.json`에 캐시, 같은 셀의 학습 시드가 공유
+  - legacy (원 논문): exp(−α · Δd / D_max) − γ_q · 큐 압박 − 마지막 빈 idle 로봇 소진 페널티
     - α_mid = 2, α_idle = 1, γ_q = 0.3, 소진 페널티 0.2, D_max = 2 × (피킹 셀·도킹 셀 사이 최대 거리)
-    - 결정당 γ = 0.99 할인
-  - smdp: 결정 사이 구간의 비용률 (시스템 내 주문 수 + c_d · v · 운행 로봇 수)을 시간 적분 / 1000
-    - 할인 e^(−βτ), β = 1/300, c_d = 1
-    - 시스템 내 주문 수가 비용 → 할인 없이 적분하면 총 주문 흐름시간 + c_d · 총 이동거리
+  - 할인: discount = "time"이면 e^(−βτ) (β = 1/300, SMDP), "decision"이면 결정당 γ = 0.99
   - 기록되는 reward는 완료 주문 1건당 값
-- **학습**: Double DQN, PER, 3-step, 앞쪽 절반 에피소드는 λ ∈ [0.7λ, λ] 커리큘럼
-- **리비전 arm** (`local_r8_ddqn_v2`에서 한 요소만 바꿈)
-  - `local_r8_ddqn_v2_gamma`: local 비용 그대로, 할인만 결정당 γ = 0.99 (`RLSimulator(discount="decision")`), μ(λ)는 기본 `local_mu.json` 공유
-  - `legacy_r8_ddqn_v2`: legacy 보상 + 결정당 γ + GlobalDQNAgent(α ≤ 1, Huber), μ(λ) 없음. BL6 prior 척도 1/Z는 local 보상 단위 그대로라 legacy 보상 척도와 다름 (α f가 흡수)
-  - 큐 압박/소진 페널티 활성 빈도는 `train.csv`의 `n_qpen_active`, `n_depletion_active` / `n_decisions`
-- **다른 M·K에서 평가** (`run_rl.py --load`): BL6 prior 척도 `mc_scale = dist_norm / v / Z`를 평가 레이아웃의 `dist_norm`으로 다시 설정 (기본, 주차장 행 수가 M·K에 따라 달라짐). `--keep-train-mc-scale`이면 체크포인트 값 유지. 두 값과 적용 여부는 `run.json`의 `mc_scale`. 전역 상태 차원이 K에 의존해 K가 다른 체크포인트는 로드 불가 (K별 네트워크 필요)
-- 뷰어: 정책 "RL (checkpoint)"로 재생, 결정마다 후보 Q값/Δd/BL6 한계비용 표시. 보상 모드는 체크포인트 학습 조건을 따름
+  - 새 보상: `rewards.Reward`를 상속해 훅(`on_decision`, `on_queue`, `on_interval`, `finalize`)을 구현하고 `REWARDS`에 등록한 뒤 `ARMS`에 arm 추가 (μ(λ) 기준점이 필요하면 `uses_mu = True`)
+- **arm** (`rewards.ARMS`) = 보상 설정
 
-## 7. 실행
+  | arm | 보상 | 할인 | 계수 (w_ext, w_q) |
+  |---|---|---|---|
+  | `local_r8_ddqn_v2` (기본) | local | e^(−βτ) | (1, 1) |
+  | `local_r8_ddqn_v2_gamma` | local | γ | (1, 1) |
+  | `legacy_r8_ddqn_v2` | legacy | γ | - |
+  | `local_r8_ddqn_v2_wext{w}`, `_wq{w}` | local | e^(−βτ) | 한 항만 w ∈ {0, 0.25, 0.5, 2, 4} |
 
-- `python run.py`: BL1~BL6을 같은 평가 시드로 돌려 비교표 출력, CSV는 `logs/grid_{traffic}_{motion}/`
-- `python run_rl.py --arm {arm}`: RL 학습 후 같은 평가 시드로 RL과 베이스라인 비교, 결과는 `logs_rl/`, `--summarize`로 요약
+  보상 재설계 arm (`rewards.py` 모듈 설명에 식)
+
+  | arm | 보상 | n | 특징 | tote_order | 기타 |
+  |---|---|---|---|---|---|
+  | `local_noterm2` (단계 1) | local, (w_ext, w_q) = (0, 1) | 3 | base | arrival | μ(λ) |
+  | `order_inc`, `order_inc_n10` (안 A) | order_increment | 5, 10 | order | bottleneck_first | ρ(λ) 중심화 |
+  | `little_pbrs` (안 B) | little_pbrs | 3 | order | bottleneck_first | c_phi = 1, β = 1/300, 중심화 없음 |
+  | `little_pbrs_cphi0`, `_cphi0.5`, `_n10` (단계 4) | little_pbrs | 3, 3, 10 | order | bottleneck_first | c_phi = 0, 0.5, 1 |
+  | `<위 arm>_nocurr` (단계 5) | 같음 | 같음 | 같음 | 같음 | 커리큘럼 없음 |
+
+- **다른 M·K에서 평가** (`run_rl.py --load`, 재학습 없음): BL6 prior 척도 `mc_scale`을 평가 레이아웃의 `dist_norm`으로 다시 설정 (기본, 주차장 행 수가 M·K에 따라 달라짐). `--keep-train-mc-scale`이면 체크포인트 값 유지. 두 값과 적용 여부는 `run.json`의 `mc_scale`. 경과시간 특징 정규화는 체크포인트 학습 sim_time. 전역 상태 차원이 K에 의존해 K가 다른 체크포인트는 로드 불가 (K별 네트워크 필요)
+- 큐 압박/소진 페널티 조건 빈도는 `train.csv`의 `n_qpen_active`, `n_depletion_active` / `n_decisions` (보상과 무관하게 기록)
+- 뷰어: 정책 "RL (checkpoint)"로 재생, 결정마다 후보 Q값/Δd/BL6 한계비용 표시. 보상 설정은 체크포인트 arm을 따름
+
+## 7. 실행과 실험 구조
+
+- `python run.py`: 베이스라인을 같은 테스트 시드로 돌려 비교표 출력, CSV는 `logs/grid_{traffic}_{motion}/`
+- `python run_rl.py --arm {arm}`: RL 학습 후 같은 테스트 시드로 RL과 베이스라인 비교, 결과는 `logs_rl/`, `--summarize`로 요약
 - `python -m viewer.server`: 한 번 실행해 재생 (README 참고)
-- 리비전 실험: `python experiments/revision.py <묶음 E1~E3, T1~T6> --out logs_exp` (docstring 참고), 분석 `python experiments/revision_analyze.py --out logs_exp` → `logs_exp/revision_tables/`
-- 기본 동작 동일성 검증: `python experiments/verify_revision.py all` (병합 전 코드 worktree `../revision_base` 필요)
-- 부록 레이아웃 정보: `python experiments/layout_info.py`
+- 실험 (`experiments/`)
+  - `design.py`: 실험 블록별 셀·학습 시드·arm·정책 목록 (실행기와 표 생성이 공유)
+  - `runner.py <계획>`: main, variants, sens, fleet, small, factorial, routing, status. 끝난 run은 건너뜀, 진행 기록 `{out}/progress.md`
+  - `tables.py`: 논문 표 CSV → `{out}/tables/`
+  - `route_gap.py`: NNH vs exact 경로 비교 (runner routing이 호출), `curve_check.py`: 학습 곡선 구간 요약, `layout_info.py`: 부록 레이아웃 정보
+- 실험 구조
 
-## 8. 알려진 한계와 TODO
+  | 요소 | 구현 |
+  |---|---|
+  | 공통 테스트 인스턴스 대응 비교 | 테스트 시드 10000 + i (N_TEST = 30)를 모든 정책·학습 시드·셀이 공유, 학습·검증 시드와 겹치지 않음 |
+  | 기준 선택 | 검증 시드 20000 + i로 SELECT_KEYS 중 최고를 셀마다 고름 (`select.json`), 테스트 시드는 선택에 쓰지 않음 |
+  | 학습 시드 단위 CI | `analysis.seed_level_compare`: 시드별 평균 차이, nested 부트스트랩과 t 구간, 시드 간 대응 t, Holm (표 단위) |
+  | 요인 실험 | factorial: λ·M은 같은 네트워크를 전이(네트워크 내), K는 K별 네트워크(네트워크 간). 효과는 네트워크 단위 (`analysis.factorial_effects_by_unit`) |
+  | 재학습 없는 일반화 | fleet·small·factorial: `run_rl.py --load`로 다른 셀에서 평가 |
+  | 라우팅 오차 분리 | routing: 같은 네트워크를 경로 규칙 fixed_dock·fixed_return에서 재평가 + NNH 경로 구성 기록을 exact와 오프라인 비교 |
+
+## 8. 설정 키 (보상 재설계·베이스라인 보강)
+
+모든 키의 기본값 = 현행 동작 (기본 설정 회귀 테스트 `python tests/regression.py`, 단위 테스트 `python -m unittest discover tests`)
+
+| 위치 | 키 | 기본값 | 다른 값 |
+|---|---|---|---|
+| `rewards.Arm` | `reward` | `local` | `order_increment` (안 A), `little_pbrs` (안 B), `legacy` |
+| | `local_w` | (1, 1) | (0, 1) = 2항 제거 (단계 1) |
+| | `n_step` | 3 | 5, 10 |
+| | `features` | `base` | `order`: 후보 특징 5 (Ť_{k,m}, slack, is_bottleneck, 늦어지는 다른 주문 수, Delta_order) + 전역 2 (최근 5분 도착 수, 빈 idle 로봇 수) |
+| | `tote_order` | `arrival` | `bottleneck_first` |
+| | `curriculum` | True | False (비정상 도착) |
+| | `c_phi` | 1.0 | little_pbrs shaping 계수 |
+| | `beta` | None (= `SMDP_BETA` 1/300) | 0 = 할인 없음 (진단 테스트) |
+| `SimulatorBase` | `tote_order` | `arrival` | `bottleneck_first` (정책 키 `@bf`, RL은 arm) |
+| `constant.py` | `PC_CONFIRMED` | `estimate` | `sipp` (확정 계획의 완료시각을 예약 경로에서, Delta_order는 항상 estimate) |
+| | `PC_DOCK` | `batch` (도킹 처리 합 끝에 모두 완료 = 시뮬레이터) | `sequential` (j번째 토트 = j번째까지 처리 합) |
+| | `BL6_CD_GRID` | (0, 0.25, 0.5, 1, 2) | BL6\* 튜닝 격자 |
+| `scenario.Scenario` | `arrival` / `step_rates` | `poisson` / () | `nhpp_steps` + 구간별 λ 배수 (평균 1, thinning) |
+| `experiments/tables.py` | `--pool` | `old` (BL4–BL7) | `new` (BL4–BL8 + BL6\*, tote_order 두 가지) |
+
+- 계획 완료시각 Ť (`planning.py`): 결정 시점 로봇 상태 틱부터 남은 트립을 걸으며 이동시간 d/v, 피킹 시간 (틱 올림), 도착 시점 WS backlog 대기, 처리 시간을 더함. 다른 로봇의 예약은 무시 (Δd와 같은 가정). backlog = 그 WS에서 처리 중인 다른 로봇의 남은 처리 + 대기열 셀에서 그 도킹을 기다리는 로봇의 처리
+  - 지시서의 "τ_w × 순번"은 시뮬레이터가 도킹 셀의 토트를 한꺼번에 처리 완료로 기록하는 것과 달라, 실현값과 일치해야 하는 단위 테스트를 위해 기본을 `batch`로 둠 (`PC_DOCK = "sequential"`이 지시서 식)
+- 새 지표 (eval.csv 열): `flow_p99`, `utilization` (운행 로봇 시간 / (M·T)), `idle_at_decision` (후보가 있는 토트 도착 시점의 평균 idle 로봇 수), RL 평가의 결정 분류 `agree_cd0`, `agree_bl8`, `cd_reproducible` (어떤 c_d ≥ 0의 BL6로도 재현되는 결정 비율, 1차원 구간 교집합)
+- 단계별 실행: `scripts/run_stage{0..6}.sh`, `scripts/run_rl_current.sh` (`experiments/stages.py` 설명). 결과 `results/<stage>/summary.md` + CSV, 학습 로그 `runs/<stage>_<arm>/s<seed>/train.log`
+
+## 9. 알려진 한계와 TODO
 
 - [ ] **복귀 중 로봇에 삽입할 때의 처리**
   - 현재 동작
