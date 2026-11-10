@@ -1,0 +1,36 @@
+# 실험 설정 예시. python train.py --config experiments/configs/base.yaml
+# 복사해서 name을 바꾸면 결과가 runs/<name>/에 분리되고, 실행 설정이 runs/<name>/config_*.yaml로 남음
+# 키 = train.py / experiments.run_compare 인자 이름 (명령행 인자가 우선). 없는 키는 코드 기본값
+name: base
+
+# 실험 조건
+lam: 320          # orders/hr
+robots: 14
+ws: 3
+sim_time: 36000   # s
+traffic: free     # free | lanes
+motion: reserve   # reserve | reactive
+route: nnh        # nnh | fixed_dock | fixed_return
+# grid: [3, 14, 20]   # 블록 수, 블록당 통로 수, 선반 행 수
+# scenario: {arrival: batch, batch_mean: 6}
+
+# 학습 (train.py)
+arm: local_r8_ddqn_v2
+seed: 1
+episodes: 1000
+select: val
+val_every: 50
+n_val: 5
+
+# 학습 계수 (민감도 분석 대상, 생략하면 기본값)
+# lr: 3.0e-4
+# batch_size: 128
+# buffer_size: 50000
+# target_update: 200
+# epsilon: 0.05
+# update_ratio: 8
+# curriculum_margin: 0.7
+
+# 비교 (experiments.run_compare)
+n_eval: 20
+baselines: [BL4, BL5, BL6]

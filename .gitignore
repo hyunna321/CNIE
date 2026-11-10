@@ -4,3 +4,4 @@ __pycache__/
 *.pt
 logs/
 logs_rl/
+runs/

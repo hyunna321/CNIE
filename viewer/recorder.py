@@ -179,7 +179,7 @@ class DecisionStats:
         pass
 
     def on_rl_decision(self, sim, tote, eligible, cand_feats, idx, deltas):
-        from baselines import bl6_marginal_cost
+        from baselines.policies import bl6_marginal_cost
         mc  = [bl6_marginal_cost(sim, r, d) for r, d in zip(eligible, deltas)]
         lo  = min(mc)
         hit = mc[idx] - lo < self.tie_tol
@@ -195,7 +195,7 @@ class DecisionStats:
         A = [bl6_marginal_cost(sim, r, d, 0.0) for r, d in zip(eligible, deltas)]
         self.agree_cd0 += A[idx] - min(A) < self.tie_tol
         self.cd_repro  += self._cd_reproducible(A, deltas, idx)
-        from planning import planned_completions, delta_order
+        from env.simulator import planned_completions, delta_order
         pc = planned_completions(sim, "estimate")
         D  = [delta_order(sim, tote, r, pc)[0] for r in eligible]
         ties = [i for i, x in enumerate(D) if x - min(D) < self.tie_tol]

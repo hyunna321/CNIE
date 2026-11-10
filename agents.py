@@ -20,14 +20,30 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from environment import Robot
-from constant import (
-    SIM_TIME, NUM_WORKSTATIONS, DEFAULT_SEED, ROBOT_SPEED, COST_DIST,
-    GAMMA, LR, BATCH_SIZE, REPLAY_BUFFER_SIZE, TARGET_UPDATE_STEPS, EPSILON, GRAD_CLIP, N_STEP, HUBER_DELTA,
-    MAX_CANDIDATES, MAX_CANDIDATES_MARGIN, GLOBAL_ROBOT_DIM, RESIDUAL_SCALE, ALPHA_MAX,
-    PER_ALPHA, PER_BETA_START, PER_BETA_END, PER_PRIORITY_EPS,
-    DELTA_NORM_CLIP, STATE_MAX_TIME, REWARD_SCALE, TOTAL_EPISODES,
-)
+from env.robot import Robot
+from env.orders import SIM_TIME, DEFAULT_SEED
+from env.layout import NUM_WORKSTATIONS, ROBOT_SPEED
+from env.simulator import marginal_cost_terms
+from env.rl import GAMMA, N_STEP, GLOBAL_ROBOT_DIM, STATE_MAX_TIME, REWARD_SCALE
+
+# 하이퍼파라미터 (모든 arm 공통)
+LR                    = 3e-4
+BATCH_SIZE            = 128
+REPLAY_BUFFER_SIZE    = 50_000
+TARGET_UPDATE_STEPS   = 200
+EPSILON               = 0.05    # 고정 ε (BL6 근처에서 데이터 수집)
+GRAD_CLIP             = 10.0
+HUBER_DELTA           = 1.0     # Huber 손실 전환점 (보상 단위)
+MAX_CANDIDATES        = 8
+MAX_CANDIDATES_MARGIN = 3       # max_candidates = max(MAX_CANDIDATES, num_robots + margin)
+RESIDUAL_SCALE        = 0.1     # Q = α · f − k · mc_BL6 의 α 초기값 (BL6에서 천천히 벗어나도록)
+ALPHA_MAX             = 1.0     # α 상한 (α = ALPHA_MAX · sigmoid(logit))
+PER_ALPHA             = 0.6
+PER_BETA_START        = 0.4
+PER_BETA_END          = 1.0
+PER_PRIORITY_EPS      = 1e-6
+DELTA_NORM_CLIP       = 3.0     # 정규화된 삽입 detour 상한
+TOTAL_EPISODES        = 1000
 
 BL6_EXTRA_DIM = 5     # 후보 특징 끝의 BL6 한계비용 구성요소 수 (마지막 열 = 한계비용 합계, prior에 사용)
 ORDER_CAND_DIM = 5    # features="order" 후보 특징 (RLSimulator._order_features): Ť_{k,m}, slack, is_bottleneck,
@@ -193,7 +209,9 @@ class DQNAgent:
 
     def __init__(self, robot_capacity: int, dist_norm: float, seed: int = DEFAULT_SEED,
                  sim_time: float = SIM_TIME, num_robots: Optional[int] = None,
-                 num_workstations: int = NUM_WORKSTATIONS, n_step: int = N_STEP, features: str = "base"):
+                 num_workstations: int = NUM_WORKSTATIONS, n_step: int = N_STEP, features: str = "base",
+                 lr: float = LR, batch_size: int = BATCH_SIZE, buffer_size: int = REPLAY_BUFFER_SIZE,
+                 target_update: int = TARGET_UPDATE_STEPS, epsilon: float = EPSILON):
         """
         입력:
             robot_capacity: 로봇 용량
@@ -204,7 +222,10 @@ class DQNAgent:
             num_workstations: 워크스테이션 수 (전역 상태 차원)
             n_step: n-step 전이 길이 (arm.n_step)
             features: 특징 세트 "base" / "order" (arm.features, order_feature_dims)
+            lr, batch_size, buffer_size, target_update, epsilon: 학습 계수 (train.py, 실험 설정 YAML)
         """
+        self.batch_size       = batch_size
+        self.target_update    = target_update
         self.robot_capacity   = robot_capacity
         self.sim_time         = sim_time
         self.num_robots       = num_robots
@@ -223,11 +244,11 @@ class DQNAgent:
         self.target_net = ScoreNet(self.feat_dim, self.ctx_dim, mc_scale).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
-        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=LR)
-        self.buffer    = PrioritizedReplayBuffer(REPLAY_BUFFER_SIZE, seed=seed)
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
+        self.buffer    = PrioritizedReplayBuffer(buffer_size, seed=seed)
         self.nstep_buf = NStepBuffer(n=n_step)
 
-        self.epsilon  = EPSILON
+        self.epsilon  = epsilon
         self.beta     = PER_BETA_START
         self.steps    = 0
         self.rng      = random.Random(seed)
@@ -302,18 +323,13 @@ class DQNAgent:
         return feats
 
     def _bl6_features(self, r: Robot, delta: float, layout, onboard: int) -> List[float]:
-        """BL6(baselines.bl6_marginal_cost)와 같은 식의 한계비용 구성요소 (정규화)
+        """BL6와 같은 식(env.simulator.marginal_cost_terms)의 한계비용 구성요소 (정규화)
 
         [적재 토트 비율, 적재 토트 지연, 배정 후 남은 거리, 추가 이동거리, 한계비용 합계]
         onboard: 아직 하역하지 않은 토트 수 (capacity − idle_slots는 트립 중 하역분을 빼지 않아 과대)
         정규화 기준: 거리는 layout.dist_norm, 시간은 dist_norm / 속도
         """
-        if r.is_idle:
-            remaining_after, delay_onboard = delta, 0.0
-        else:
-            remaining_after = r.remaining_distance + delta
-            delay_onboard   = onboard * delta / ROBOT_SPEED
-        mc = delay_onboard + remaining_after / ROBOT_SPEED + COST_DIST * delta
+        remaining_after, delay_onboard, mc = marginal_cost_terms(r, delta, onboard)
         dn, tn = layout.dist_norm, layout.dist_norm / ROBOT_SPEED
         return [onboard / self.robot_capacity, min(delay_onboard / tn, 5.0), min(remaining_after / dn, 5.0),
                 min(delta / dn, 5.0), min(mc / tn, 10.0)]
@@ -378,11 +394,11 @@ class DQNAgent:
         """PER 배치 하나로 Double DQN 업데이트 1회 (다음 상태 행동은 policy_net, 값은 target_net), Huber 손실
 
         출력:
-            가중 손실값, 버퍼가 BATCH_SIZE보다 작으면 None
+            가중 손실값, 버퍼가 batch_size보다 작으면 None
         """
-        if len(self.buffer) < BATCH_SIZE:
+        if len(self.buffer) < self.batch_size:
             return None
-        batch, idxs, weights = self.buffer.sample(BATCH_SIZE, self.beta)
+        batch, idxs, weights = self.buffer.sample(self.batch_size, self.beta)
         zero = (np.zeros((self.max_candidates, self.feat_dim), np.float32),
                 np.zeros(self.max_candidates, np.bool_), 0,
                 np.zeros_like(batch[0][0][3]), np.zeros_like(batch[0][0][4]))
@@ -411,7 +427,7 @@ class DQNAgent:
         self.optimizer.step()
 
         self.steps += 1
-        if self.steps % TARGET_UPDATE_STEPS == 0:
+        if self.steps % self.target_update == 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
         return loss.item()
 
