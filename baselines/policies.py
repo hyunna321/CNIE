@@ -11,9 +11,10 @@
 """
 import random
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from env.orders import Tote
+from env.reserve import ReserveMixin, reserve_cost_terms
 from env.rl import compute_legacy_reward
 from env.robot import Robot
 from env.simulator import COST_DIST, SimulatorBase, delta_order, marginal_cost_terms, planned_completions
@@ -66,8 +67,10 @@ class BufferSimulator(SimulatorBase):
         idle 로봇이 없으면 대기 큐에 넣음
         """
         idle = [r for r in self.robots if r.is_idle and r.idle_slots > 0]
+        if self.battery is not None:
+            idle = self.battery.filter(idle, tote)
         if not idle:
-            self.order_mgr.enqueue(tote, self.now)
+            self._enqueue_tote(tote)
             return
         robot = self._pick_idle(idle)
         self._robot_totes[robot.id].append(tote)
@@ -76,14 +79,13 @@ class BufferSimulator(SimulatorBase):
         if self.robot_capacity - robot.idle_slots >= self.depart_k:
             self._depart(robot)
 
-    def _on_trip_complete(self, robot: Robot):
-        """트립 완료 후 대기 큐에서 최대 용량만큼 꺼내 싣고 depart_k개 이상이면 바로 출발
+    def _serve_queue(self, robot: Robot):
+        """대기 큐에서 꺼낸 토트를 싣고 depart_k개 이상이면 바로 출발
 
         입력:
-            robot: 트립을 마친 로봇
+            robot: idle 로봇
         """
-        self._complete_trip(robot)
-        totes = self.order_mgr.dequeue_up_to(self.robot_capacity)
+        totes = self._take_from_queue(robot)
         if totes:
             self._load_totes(robot, totes)
             robot.idle_slots = self.robot_capacity - len(totes)
@@ -139,9 +141,9 @@ class InsertionSimulator(SimulatorBase):
     def _on_tote_arrival(self, tote: Tote):
         """새 토트를 _select_robot()이 고른 로봇에 배정 (후보가 없으면 대기 큐에 넣음)"""
         t0 = time.perf_counter()
-        eligible = self._eligible_robots()
+        eligible = self._eligible_robots(tote)
         if not eligible:
-            self.order_mgr.enqueue(tote, self.now)
+            self._enqueue_tote(tote)
             return
         robot = self._select_robot(tote, eligible)
         t_sel = time.perf_counter()
@@ -217,6 +219,34 @@ class MarginalCostSimulator(InsertionSimulator):
     def _select_robot(self, tote, eligible):
         """한계 비용이 가장 작은 후보"""
         return min(eligible, key=lambda r: self._marginal_cost(r, tote))
+
+
+class RandomReserveSimulator(ReserveMixin, RandomAssignSimulator):
+    """BL3R: 예약도 무작위 로봇 (예약이 찬 로봇 제외)"""
+
+    def _reserve_cost(self, robot, tote):
+        return self._assign_rng.random()
+
+
+class NearestReserveSimulator(ReserveMixin, NearestRobotSimulator):
+    """BL4R: 지금 트립을 마칠 위치(마지막 도킹 셀)가 토트에 가장 가까운 로봇에 예약"""
+
+    def _reserve_cost(self, robot, tote):
+        return self.layout.distance(robot.workstation, tote.loc)
+
+
+class MinInsertionReserveSimulator(ReserveMixin, MinInsertionSimulator):
+    """BL5R: 다음 트립에 넣을 때 늘어나는 거리 Δd가 가장 작은 로봇에 예약"""
+
+    def _reserve_cost(self, robot, tote):
+        return self._next_trip_delta(robot, tote)[1]
+
+
+class MarginalCostReserveSimulator(ReserveMixin, MarginalCostSimulator):
+    """BL6R: 지금 트립을 마친 뒤의 BL6 형태 한계비용(env.reserve.reserve_cost_terms)이 가장 작은 로봇에 예약"""
+
+    def _reserve_cost(self, robot, tote):
+        return reserve_cost_terms(self, robot, tote, self.cost_dist)[4]
 
 
 class OrderPlannedSimulator(InsertionSimulator):

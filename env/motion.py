@@ -343,6 +343,8 @@ class MotionEngine:
                     self._occ[nxt] = r.id
                 r.pos = nxt
                 self._total_sim_distance += CELL_SIZE
+                if self.battery is not None:
+                    self.battery.on_move(r)
                 moved.add(r.id)
                 changed = True
 
@@ -477,6 +479,8 @@ class MotionEngine:
                         raise RuntimeError(f"예약 불일치: 로봇 {r.id}가 {r.timer_kind} 중인데 {r.pos}->{cell} 이동 계획 (t={self.now:.0f})")
                     r.pos = cell
                     self._total_sim_distance += CELL_SIZE
+                    if self.battery is not None:
+                        self.battery.on_move(r)
                     moved.append(r)
                     continue
             elif r.plan and r.plan[0][0] < k:

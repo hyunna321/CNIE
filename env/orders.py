@@ -367,6 +367,12 @@ class OrderManager:
         self._queue_entry_times.append(enqueue_time)
         self.n_enqueued += 1
 
+    def requeue_front(self, totes: List[Tote], time: float):
+        """토트들을 대기 큐 앞에 순서대로 되돌림 (예약이 무산된 토트, 도착 시 큐잉 수 n_enqueued는 그대로)"""
+        if totes:
+            self.wait_queue = list(totes) + self.wait_queue
+            self._queue_entry_times = [time] * len(totes) + self._queue_entry_times
+
     def dequeue_up_to(self, n: int) -> List[Tote]:
         """대기 큐 앞에서 FIFO 순서로 최대 n개 꺼내기
 

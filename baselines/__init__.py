@@ -6,7 +6,8 @@ from functools import partial
 
 from baselines.policies import (FullBufferSimulator, FillBufferSimulator, PartialSimulator, RandomAssignSimulator,
                                 NearestRobotSimulator, MinInsertionSimulator, MarginalCostSimulator,
-                                GreedyRewardSimulator, OrderPlannedSimulator, PARTIAL_K)
+                                MarginalCostReserveSimulator, GreedyRewardSimulator, OrderPlannedSimulator, PARTIAL_K,
+                                RandomReserveSimulator, NearestReserveSimulator, MinInsertionReserveSimulator)
 
 BL6_CD_GRID = (0.0, 0.25, 0.5, 1.0, 2.0)   # BL6* 튜닝 격자 (설정마다 검증 시드로 c_d 선택)
 
@@ -22,11 +23,17 @@ POLICIES = {
     "BL6D0": ("BL6_MarginalCost_cd0",    partial(MarginalCostSimulator, cost_dist=0.0)),   # 거리비용 c_d = 0
     "GR":    ("Greedy_R",                GreedyRewardSimulator),
     "BL8":   ("BL8_OrderPlanned",        OrderPlannedSimulator),
+    # 후보가 없으면 공용 FIFO 큐 대신 로봇별 다음 트립 예약 (baselines.policies.ReserveMixin)
+    "BL3R":  ("BL3R_Random_reserve",       RandomReserveSimulator),
+    "BL4R":  ("BL4R_Nearest_reserve",      NearestReserveSimulator),
+    "BL5R":  ("BL5R_MinInsertion_reserve", MinInsertionReserveSimulator),
+    "BL6R":  ("BL6R_MarginalCost_reserve", MarginalCostReserveSimulator),
 }
 # 논문 번호 BL7 = Greedy_R (정책 키 GR), BL6c0 = BL6D0, BL6c1 = BL6
 POLICY_ALIASES = {"BL7": "GR", "BL6c0": "BL6D0", "BL6c1": "BL6"}
 # 매개변수 키 (resolve_policy)
 #   BL6c{c}      : BL6에서 c_d = c (라벨 BL6_MarginalCost_cd{c}), 예: BL6c0.25. BL6* 튜닝 격자 BL6_CD_GRID
+#   BL6Rc{c}     : BL6R에서 c_d = c (라벨 BL6R_MarginalCost_reserve_cd{c})
 #   {키}@bf      : 주문 내 토트 배정 순서 bottleneck_first (라벨 뒤 _bf), 예: BL6@bf, BL6c0.5@bf, BL8@bf
 BF_SUFFIX = "@bf"
 
@@ -50,6 +57,12 @@ def resolve_policy(key: str):
         except ValueError:
             raise KeyError(key)
         label, factory = f"BL6_MarginalCost_cd{c:g}", partial(MarginalCostSimulator, cost_dist=c)
+    elif base.startswith("BL6Rc"):
+        try:
+            c = float(base[5:])
+        except ValueError:
+            raise KeyError(key)
+        label, factory = f"BL6R_MarginalCost_reserve_cd{c:g}", partial(MarginalCostReserveSimulator, cost_dist=c)
     else:
         raise KeyError(key)
     if bf:

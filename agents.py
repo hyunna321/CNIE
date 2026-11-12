@@ -20,6 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+from env.battery import BATTERY_CAND_DIM, BATTERY_CTX_DIM
 from env.robot import Robot
 from env.orders import SIM_TIME, DEFAULT_SEED
 from env.layout import NUM_WORKSTATIONS, ROBOT_SPEED
@@ -51,9 +52,17 @@ ORDER_CAND_DIM = 5    # features="order" 후보 특징 (RLSimulator._order_featu
 ORDER_CTX_DIM = 2     # features="order" 전역 특징 (W 끝): 최근 5분 도착 수, 빈 idle 로봇 수
 
 
+RESERVE_CAND_DIM = 3  # features="reserve*" 후보 특징 (RLSimulator._reserve_features): 예약 후보 여부, 해제까지 시간, 예약 수
+RESERVE_CTX_DIM  = 1  # features="reserve*" 전역 특징: 전체 예약 토트 수 / (M·C)
+
+
 def order_feature_dims(features: str) -> Tuple[int, int]:
     """특징 세트별 (후보 특징 추가 차원, 전역 특징 추가 차원)"""
-    return (ORDER_CAND_DIM, ORDER_CTX_DIM) if features == "order" else (0, 0)
+    return {"order": (ORDER_CAND_DIM, ORDER_CTX_DIM),
+            "battery": (BATTERY_CAND_DIM, BATTERY_CTX_DIM),
+            "reserve": (RESERVE_CAND_DIM, RESERVE_CTX_DIM),
+            "reserve_battery": (RESERVE_CAND_DIM + BATTERY_CAND_DIM, RESERVE_CTX_DIM + BATTERY_CTX_DIM),
+            }.get(features, (0, 0))
 
 
 def candidate_feature_dim(robot_capacity: int, features: str = "base") -> int:
@@ -289,7 +298,8 @@ class DQNAgent:
 
     def build_candidates(self, tote_loc: Tuple[int, int], robots: List[Robot], deltas: List[float],
                          layout, ctx: Dict, now: float = 0.0,
-                         order_feats: Optional[List[List[float]]] = None) -> np.ndarray:
+                         order_feats: Optional[List[List[float]]] = None,
+                         bl6_terms: Optional[List[Tuple[float, float, float, float, float]]] = None) -> np.ndarray:
         """후보 로봇마다 (토트, 로봇) 특징벡터
 
         - 토트 위치의 상대좌표 2 (후보 로봇의 트립 마지막 WS 기준), 삽입 detour 1
@@ -306,6 +316,8 @@ class DQNAgent:
             layout: GridWarehouseLayout
             ctx: RLSimulator._context() 결과 (n_wait, n_in_system, n_busy, num_robots, onboard)
             now: 현재 시각 (s)
+            bl6_terms: 후보별 BL6 구성요소 원값 (적재 비율, 적재 지연 s, 남은 거리 m, 추가 거리 m, 비용 합계 s).
+                       주면 marginal_cost_terms 대신 사용 (예약 후보의 env.reserve.reserve_cost_terms, prior도 이 합계)
         출력:
             (len(robots), feat_dim) float32 배열
         """
@@ -319,8 +331,14 @@ class DQNAgent:
             feats[i] = ([(tote_loc[0] - wx) / cn, (tote_loc[1] - wy) / cn, min(delta / dn, DELTA_NORM_CLIP)]
                         + r.state_vector(STATE_MAX_TIME) + base_ctx
                         + (list(order_feats[i]) if order_feats is not None else [])
-                        + self._bl6_features(r, delta, layout, ctx["onboard"][r.id]))
+                        + (self._norm_bl6(*bl6_terms[i], layout) if bl6_terms is not None
+                           else self._bl6_features(r, delta, layout, ctx["onboard"][r.id])))
         return feats
+
+    def _norm_bl6(self, load: float, delay: float, remaining: float, delta: float, cost: float, layout) -> List[float]:
+        """BL6 구성요소 원값을 _bl6_features와 같은 기준으로 정규화"""
+        dn, tn = layout.dist_norm, layout.dist_norm / ROBOT_SPEED
+        return [load, min(delay / tn, 5.0), min(remaining / dn, 5.0), min(delta / dn, 5.0), min(cost / tn, 10.0)]
 
     def _bl6_features(self, r: Robot, delta: float, layout, onboard: int) -> List[float]:
         """BL6와 같은 식(env.simulator.marginal_cost_terms)의 한계비용 구성요소 (정규화)
@@ -386,6 +404,11 @@ class DQNAgent:
         if done:
             for t in self.nstep_buf.flush():
                 self.buffer.push(*t)
+
+    def flush_nstep(self):
+        """에피소드 절단 (terminal 아님): n-step 버퍼에 남은 전이를 짧은 return + 부트스트랩으로 저장 (arm.truncate)"""
+        for t in self.nstep_buf.flush():
+            self.buffer.push(*t)
 
     def _stack(self, keys, j):
         return torch.tensor(np.stack([k[j] for k in keys]))

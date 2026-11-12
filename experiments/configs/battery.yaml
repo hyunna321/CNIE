@@ -1,0 +1,31 @@
+# 배터리 제약 실험 설정 예시. python train.py --config experiments/configs/battery.yaml
+# battery 값은 env.battery.BatteryConfig 필드. MTSR 연구(arXiv 2407.06394) 설정 환산: 이동 200분, 20 %에서 완충까지 30분
+name: battery
+
+# 실험 조건
+lam: 320          # orders/hr
+robots: 14
+ws: 3
+sim_time: 36000   # s
+traffic: free     # free | lanes
+motion: reserve   # reserve | reactive
+route: nnh        # nnh | fixed_dock
+battery:
+  range_m: 12000      # 만충 주행거리 (m, 1 m/s로 200분)
+  charge_rate: 5.333333333333333   # 충전 1초당 회복 주행거리 (m/s, 9600 m / 1800 s)
+  reserve_m: 50       # 실행 가능성 여유 (m)
+  low_soc: 0.2        # 트립 완료 시 이 비율 미만이면 필수 충전
+  target_soc: 1.0     # 필수 충전 목표 (완충)
+  initial_soc: 1.0
+
+# 학습 (train.py)
+arm: local_battery
+seed: 1
+episodes: 1000
+select: val
+val_every: 50
+n_val: 5
+
+# 비교 (experiments.run_compare)
+n_eval: 20
+baselines: [BL4, BL5, BL6]

@@ -10,10 +10,11 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from env.battery import Battery, BatteryConfig
 from env.layout import Cell, GridWarehouseLayout, ROBOT_SPEED
 from env.motion import MotionEngine, ReservationTable, to_ticks
 from env.orders import Order, OrderManager, SIM_TIME, Tote
-from env.robot import ROUTE_MODES, Robot
+from env.robot import ROUTE_MODES, Robot, path_distance
 
 COST_DIST   = 1.0    # order·s / m, BL6 한계비용에서 이동거리 1m를 흐름시간 몇 초로 환산할지 (J 지표에도 사용)
 TOTE_ORDERS = ("arrival", "bottleneck_first")   # 주문 내 토트 배정 순서 (SimulatorBase tote_order, 기본 arrival)
@@ -105,6 +106,12 @@ class EpisodeResult:
     agree_cd0:              float = float("nan")   # 선택 = BL6(c_d = 0) argmin 비율
     agree_bl8:              float = float("nan")   # 선택 = BL8 argmin 비율
     cd_reproducible:        float = float("nan")   # 어떤 c_d ≥ 0의 BL6 argmin으로도 재현되는 결정 비율
+    # 배터리 제약 (env.battery, 제약이 없으면 기본값)
+    n_charge_required:      int   = 0              # 필수 충전 횟수
+    charge_time:            float = 0.0            # robot·s, 실제 충전에 쓴 시간 (회복 주행거리 / 충전 속도)
+    min_soc:                float = float("nan")   # 에피소드 최소 SoC 비율
+    n_soc_depleted:         int   = 0              # SoC가 음수인 상태로 이동한 셀 수 (0이어야 함)
+    n_battery_rejects:      int   = 0              # SoC 부족으로 후보에서 빠진 (토트, 로봇) 수
 
     @property
     def decision_rate(self) -> float:
@@ -125,6 +132,7 @@ class EpisodeResult:
 # 사건
 
 EVENT_ORDER_ARRIVAL = "ORDER_ARRIVAL"
+EVENT_CHARGE_DONE   = "CHARGE_DONE"      # 필수 충전 완료 (env.battery)
 
 
 @dataclass(order=True)
@@ -176,7 +184,7 @@ class SimulatorBase(MotionEngine):
       (env.robot.plan_trip). 도킹 셀에서는 그 WS로 가는 토트의 처리 시간 합만큼 머묾
 
     하위 클래스는 _on_tote_arrival()로 배정 정책 정의, 필요하면
-    _on_trip_complete(), _choose_ws() 재정의
+    _serve_queue(), _choose_ws() 재정의
 
     로봇 이동은 셀 단위 틱(CELL_SIZE / ROBOT_SPEED)으로 시뮬레이션 (run)
     - 배정 결정은 주문 도착 사건 시점, 결정 시점의 로봇 위치는 직전 틱 기준
@@ -188,11 +196,12 @@ class SimulatorBase(MotionEngine):
 
     평가 옵션 (라우팅 오차 분리용, 기본값이면 동작 변화 없음)
     - route: 경로 구성 규칙 (env.robot.ROUTE_MODES, env.robot 모듈 설명). _insertion_delta도 같은 규칙
+    - battery: 배터리 제약 (env.battery 모듈 설명)
     """
 
     def __init__(self, layout: GridWarehouseLayout, lam: float, seed: int,
                  sim_time: float, num_robots: int, robot_capacity: int, route: str = "nnh",
-                 tote_order: str = "arrival"):
+                 tote_order: str = "arrival", battery: Optional[BatteryConfig] = None):
         """
         입력:
             layout: GridWarehouseLayout
@@ -204,6 +213,7 @@ class SimulatorBase(MotionEngine):
             route: 경로 구성 규칙 ROUTE_MODES (기본 "nnh")
             tote_order: 주문 내 토트 배정 순서 TOTE_ORDERS. "arrival" (기본, 주문 생성 순서) /
                         "bottleneck_first" (도착 시 토트마다 min_m Ť_{k,m}을 구해 큰 것부터, tote_completion)
+            battery: env.battery.BatteryConfig (None이면 배터리 제약 없음)
         """
         assert route in ROUTE_MODES, route
         assert tote_order in TOTE_ORDERS, tote_order
@@ -223,6 +233,7 @@ class SimulatorBase(MotionEngine):
         self.eq        = EventQueue()
         self.now       = 0.0
         self.reserve   = layout.motion == "reserve"
+        self.battery   = Battery(self, battery) if battery is not None else None
         self._reset_stats()
         # 시각화 기록기 (viewer.recorder.Recorder). None이면 기록 안 함
         self.recorder = None
@@ -289,6 +300,8 @@ class SimulatorBase(MotionEngine):
             self._res = ReservationTable()
             for r in self.robots:
                 self._res.set_rest(r.id, self.layout.cell_index[r.pos], 0)
+        if self.battery is not None:
+            self.battery.reset()
         t0, n0 = self.order_mgr.next_arrival(0.0)
         self.eq.push(Event(t0, EVENT_ORDER_ARRIVAL, {"count": n0}))
         if self.recorder is not None:
@@ -315,7 +328,10 @@ class SimulatorBase(MotionEngine):
                 ev = self.eq.pop()
                 self._advance_clock(t_ev)
                 self._t0_ctx = k - 1
-                self._handle_order_event(ev)
+                if ev.etype == EVENT_CHARGE_DONE:
+                    self._handle_charge_done(ev)
+                else:
+                    self._handle_order_event(ev)
             else:
                 self._advance_clock(t_tick)
                 self._t0_ctx = k
@@ -343,6 +359,17 @@ class SimulatorBase(MotionEngine):
         nxt, n = self.order_mgr.next_arrival(self.now)
         if nxt <= self.sim_time:
             self.eq.push(Event(nxt, EVENT_ORDER_ARRIVAL, {"count": n}))
+
+    def _push_charge_done(self, robot: Robot, t: float):
+        """필수 충전 완료 사건 예약 (env.battery)"""
+        self.eq.push(Event(t, EVENT_CHARGE_DONE, {"robot": robot.id}))
+
+    def _handle_charge_done(self, ev: Event):
+        """필수 충전 완료: 로봇을 후보로 되돌리고 대기 큐 방출"""
+        robot = self.robots[ev.data["robot"]]
+        if robot.must_charge:
+            self.battery.finish_required(robot)
+            self._serve_queue(robot)
 
     def _advance_clock(self, t: float):
         """시각을 t로 옮기며 [now, t] 구간의 상태를 _on_interval()에 전달
@@ -386,19 +413,36 @@ class SimulatorBase(MotionEngine):
         raise NotImplementedError
 
     def _on_trip_complete(self, robot: Robot):
-        """트립 완료 처리 후, 대기 토트가 있으면 최대 용량만큼 꺼내 새 트립 시작
+        """트립 완료 처리 후 대기 큐 방출
 
         입력:
             robot: 트립을 마친 로봇
         """
         self._complete_trip(robot)
-        totes = self.order_mgr.dequeue_up_to(self.robot_capacity)
+        self._serve_queue(robot)
+
+    def _take_from_queue(self, robot: Robot) -> List[Tote]:
+        """idle 로봇이 맡을 대기 토트를 FIFO로 꺼냄 (최대 용량, 배터리 제약이 있으면 SoC로 맡을 수 있는 만큼)"""
+        n = self.robot_capacity if self.battery is None else self.battery.take_count(robot)
+        return self.order_mgr.dequeue_up_to(n)
+
+    def _serve_queue(self, robot: Robot):
+        """idle 로봇에 대기 토트가 있으면 새 트립 시작 (트립 완료, 필수 충전 완료 시)"""
+        totes = self._take_from_queue(robot)
         if totes:
             self._dispatch(robot, totes)
 
-    def _eligible_robots(self) -> List[Robot]:
+    def _enqueue_tote(self, tote: Tote):
+        """배정할 로봇이 없는 토트를 대기 큐에 추가"""
+        self.order_mgr.enqueue(tote, self.now)
+        if self.battery is not None:
+            self.battery.on_enqueue()
+
+    def _eligible_robots(self, tote: Optional[Tote] = None) -> List[Robot]:
         """빈 슬롯이 있는 로봇 목록 (mid-trip 로봇 먼저, 그다음 idle 로봇)
 
+        입력:
+            tote: 배정할 토트. 배터리 제약이 있으면 이 토트를 맡을 수 있는 로봇만 남김 (None이면 필수 충전만 제외)
         출력:
             Robot 리스트
         """
@@ -406,6 +450,8 @@ class SimulatorBase(MotionEngine):
         busy     = [r for r in self.robots
                     if not r.is_idle and r.idle_slots > 0 and r.timer_kind != "ws"]
         idle_any = [r for r in self.robots if r.is_idle and r.idle_slots > 0]
+        if self.battery is not None:
+            return self.battery.filter(busy + idle_any, tote)
         return busy + idle_any
 
     def _needed_docks(self, r: Robot) -> List[Cell]:
@@ -454,6 +500,14 @@ class SimulatorBase(MotionEngine):
             docks.append(dock)
         after = robot.trip_distance_with(robot.route + [tote.loc], docks)
         return after - robot.remaining_distance
+
+    def _route_after(self, robot: Robot, tote: Optional[Tote]) -> Tuple[float, Cell]:
+        """tote를 더 맡았을 때 남은 경로의 (이동거리 m, 마지막 방문 셀). 삽입 대기 토트 포함 (env.battery)
+        tote가 None이면 지금 남은 경로. 남은 방문 지점이 없으면 (0, 현재 위치)"""
+        visits, _ = _visits(self, robot, tote)
+        if not visits:
+            return 0.0, robot.pos
+        return path_distance(robot.pos, visits, self.layout.distance), visits[-1]
 
     def _assign_tote(self, robot: Robot, tote: Tote):
         """토트를 로봇에 배정. idle이면 새 트립 시작, 이동 중이면 경로에 삽입
@@ -579,7 +633,7 @@ class SimulatorBase(MotionEngine):
         om = self.order_mgr
         sel_mean, sel_p95   = self._ms_stats(self._lat_sel)
         full_mean, full_p95 = self._ms_stats(self._lat_full)
-        return EpisodeResult(
+        res = EpisodeResult(
             label                = label,
             episode              = episode,
             lam                  = lam,
@@ -614,6 +668,9 @@ class SimulatorBase(MotionEngine):
             utilization          = self._busy_time / max(1e-9, self.num_robots * self.now),
             idle_at_decision     = self._idle_sum / self._idle_n if self._idle_n else 0.0,
         )
+        if self.battery is not None:
+            self.battery.fill_result(res)
+        return res
 
 
 # 계획 완료시각

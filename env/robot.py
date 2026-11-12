@@ -127,6 +127,10 @@ class Robot:
         self.plan              = deque()     # (틱, 셀) 순서의 예약 경로
         self.replan_pending    = False
         self.pending_insert    = []          # 계획 실패로 아직 경로에 넣지 못한 삽입 토트 위치
+        # 배터리 상태 (env.battery.Battery가 관리, 배터리 제약이 없으면 그대로)
+        self.soc               = None
+        self.charge_t0         = None
+        self.must_charge       = False
 
     @property
     def stops(self) -> List[Cell]:

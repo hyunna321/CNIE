@@ -1,0 +1,20 @@
+# TD ablation: 보상 → replay buffer → 업데이트 시점을 한 요소씩 교체 (experiments/scripts/run_td_ablation.sh)
+# 학습량은 기존 구현과 동일: 1000 에피소드, 커리큘럼 (arm 기본값), 결정 8개당 1 step, 검증 50 에피소드마다
+name: td_ablation
+
+lam: 320          # orders/hr
+robots: 20
+ws: 3
+sim_time: 36000   # s
+traffic: free
+motion: reserve
+route: nnh
+
+seed: 1
+episodes: 1000
+select: val
+val_every: 50
+n_val: 5
+
+n_eval: 20
+baselines: [BL4, BL5, BL6]
