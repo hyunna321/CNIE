@@ -5,9 +5,10 @@ import subprocess
 import time
 from typing import Dict, List, Optional
 
-from constant import DEFAULT_SEED, ROBOT_CAPACITY, SIM_TIME
-from grid import GridWarehouseLayout, RACK, AISLE, CROSS, WS_ZONE
-from scenario import Scenario, ARRIVALS, SKU_DISTS, STORAGES, TIME_DISTS
+from env.orders import DEFAULT_SEED, SIM_TIME
+from env.layout import ROBOT_CAPACITY
+from env.layout import GridWarehouseLayout, RACK, AISLE, CROSS, WS_ZONE
+from env.orders import Scenario, ARRIVALS, SKU_DISTS, STORAGES, TIME_DISTS
 from evaluation import POLICIES as EVAL_POLICIES, make_sim
 from viewer.recorder import Recorder
 
@@ -107,10 +108,10 @@ def _rl_simulator(cfg: Dict, L, sc: Scenario, M: int, K: int, cap: int, lam: flo
                   warnings: List[str]):
     """체크포인트를 불러와 ε = 0 RLSimulator 생성 (보상 설정은 체크포인트 arm을 따름)
 
-    BL6 prior 척도는 지금 레이아웃 기준으로 다시 맞춤 (run_rl.py --load 기본 동작과 같음)
+    BL6 prior 척도는 지금 레이아웃 기준으로 다시 맞춤 (run_compare --load 기본 동작과 같음)
     """
     from agents import DQNAgent
-    from rewards import ARMS
+    from env.rl import ARMS
     path = cfg.get("checkpoint")
     if not path:
         raise ValueError("RL 정책은 체크포인트 경로가 필요합니다")
@@ -122,7 +123,7 @@ def _rl_simulator(cfg: Dict, L, sc: Scenario, M: int, K: int, cap: int, lam: flo
     m = info.get("meta") or {}
     arm = ARMS.get(m.get("arm"))
     if arm is None:
-        raise ValueError(f"체크포인트 arm '{m.get('arm')}'은 지금 코드의 rewards.ARMS에 없습니다")
+        raise ValueError(f"체크포인트 arm '{m.get('arm')}'은 지금 코드의 env.rl.ARMS에 없습니다")
     agent = DQNAgent(robot_capacity=cap, dist_norm=L.dist_norm, num_robots=M, num_workstations=K,
                      sim_time=info.get("sim_time") or SIM_TIME, n_step=arm.n_step, features=arm.features)
     try:

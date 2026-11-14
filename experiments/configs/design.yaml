@@ -1,0 +1,20 @@
+# 실험 설계 (experiments/run_plans.py가 읽음). 블록 설명은 run_plans.py 모듈 설명
+base_arm: null                 # null = env.rl.DEFAULT_ARM
+train_seeds: [1, 2, 3, 4, 5]   # main 학습 시드 (기본 네트워크)
+sub_seeds: [1, 2, 3]           # 변형·민감도·요인 실험 학습 시드
+n_test: 30                     # 테스트 인스턴스 수
+n_val_select: 10               # 베이스라인 선택용 검증 인스턴스 수
+n_val_rl: 5                    # RL 체크포인트 선택용 검증 인스턴스 수
+policies:
+  select: [BL4, BL5, BL6, BL7]       # 기준(최고 삽입형 규칙) 선택 후보, BL7 = Greedy_R
+  batching: [BL1, BL1F, BL2]         # 배치 규칙 (삽입 효과 분해 = ablation)
+  all: [BL1, BL1F, BL2, BL3, BL4, BL5, BL6, BL6D0, BL7]   # 셀마다 테스트할 베이스라인
+main_lams: [240, 280, 320]
+fleet_M: [8, 10, 12, 16, 18, 20]
+small_M: [6, 10]
+variant_arms: [local_r8_ddqn_v2_gamma, legacy_r8_ddqn_v2]
+sens:                          # 보상 계수 민감도
+  lams: [320, 240]
+  terms: [wext0.5, wext2, wq0.5, wq2]
+  removal_terms: [wext0, wq0]
+route_variants: [fixed_dock]
