@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 
 from baselines import (BL6_CD_GRID, POLICIES, POLICY_ALIASES, BF_SUFFIX, resolve_policy,  # noqa: F401
                        policy_arg, policy_key, policy_label)
+from env.battery import BatteryConfig
 from env.layout import GRID_MOTION, GRID_TRAFFIC, ROBOT_CAPACITY
 from env.orders import DEFAULT_SEED, SIM_TIME
 from env.simulator import EpisodeResult
@@ -311,16 +312,21 @@ class Condition:
     route:   str = "nnh"          # 경로 구성 규칙 (env.robot.ROUTE_MODES)
     grid:    Optional[Tuple[int, int, int]] = None   # (블록 수, 블록당 통로 수, 선반 행 수), None = 기본 레이아웃
     collisions: bool = True       # False이면 reactive에서 로봇 간 점유 무시 (회귀 검증용)
+    battery: Optional[BatteryConfig] = None   # 배터리 제약 (env.battery), None = 제약 없음
 
     @property
     def sim_kw(self) -> Dict:
         """SimulatorBase 추가 인자 (기본이면 빈 dict)"""
-        return {"route": self.route} if self.route != "nnh" else {}
+        kw = {"route": self.route} if self.route != "nnh" else {}
+        if self.battery is not None:
+            kw["battery"] = self.battery
+        return kw
 
     @property
     def tag(self) -> str:
-        """경로 변형 꼬리표 (기본이면 빈 문자열, fixed_dock → _route-fixeddock)"""
-        return f"_route-{self.route.replace('_', '')}" if self.route != "nnh" else ""
+        """조건 꼬리표 (기본이면 빈 문자열, fixed_dock → _route-fixeddock, 배터리 → BatteryConfig.tag)"""
+        route = f"_route-{self.route.replace('_', '')}" if self.route != "nnh" else ""
+        return route + (self.battery.tag if self.battery is not None else "")
 
     def layout(self, num_robots: int, num_workstations: int, scenario=None):
         """이 조건의 GridWarehouseLayout"""
@@ -340,8 +346,10 @@ class Condition:
         return name + self.tag
 
     def to_dict(self) -> Dict:
-        """필드 dict (기본값인 grid, collisions는 빼서 이전 기록과 같게)"""
+        """필드 dict (기본값인 grid, collisions, battery는 빼서 이전 기록과 같게)"""
         d = asdict(self)
+        if self.battery is None:
+            del d["battery"]
         if self.grid is None:
             del d["grid"]
         if self.collisions:
@@ -381,9 +389,9 @@ def make_sim(policy: str, layout, lam: float, seed: int, sim_time: float = SIM_T
     kw = dict(lam=lam, seed=seed, sim_time=sim_time,
               num_robots=layout.num_robots, robot_capacity=layout.robot_capacity, **(sim_kw or {}))
     if policy == "RL":
-        from env.rl import RLSimulator
+        from td import rl_sim_class
         assert agent is not None, "RL 평가에는 agent가 필요합니다"
-        return RLSimulator(layout, agent, eval_mode=True, arm=arm, **kw)
+        return rl_sim_class(arm, train=False)(layout, agent, eval_mode=True, arm=arm, **kw)
     return resolve_policy(policy)[1](layout, **kw)
 
 

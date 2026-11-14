@@ -1,0 +1,20 @@
+# 예약 행동 RL 실험 (배터리 없음). experiments/scripts/run_rsv.sh가 사용
+# 학습량은 이전 실험과 동일: 1000 에피소드, 커리큘럼(arm 기본), 결정 8개당 1 step, 검증 50 에피소드마다 시드 5개
+name: rsv
+
+lam: 320          # orders/hr
+robots: 14
+ws: 3
+sim_time: 36000   # s
+traffic: free
+motion: reserve
+route: nnh
+
+seed: 1
+episodes: 1000
+select: val
+val_every: 50
+n_val: 5
+
+n_eval: 20
+baselines: [BL6c0, BL6c0.25, BL6c1, BL6Rc0, BL6Rc0.25, BL6Rc1, BL8]

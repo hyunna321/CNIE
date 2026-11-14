@@ -37,10 +37,12 @@ import yaml
 from agents import (BATCH_SIZE, DQNAgent, EPSILON, LR, REPLAY_BUFFER_SIZE, TARGET_UPDATE_STEPS, TOTAL_EPISODES)
 from evaluation import (Condition, MetricsStore, N_VAL, TrainingCurveStore, TrainingPoint, evaluate_policy,
                         train_episode_seed, val_seeds)
+from env.battery import BatteryConfig
 from env.layout import GRID_MOTION, GRID_TRAFFIC, NUM_ROBOTS, NUM_WORKSTATIONS, ROBOT_CAPACITY
 from env.orders import DEFAULT_SEED, LAMBDA_DEFAULT, Scenario, SIM_TIME
 from env.rl import ARMS, Arm, DEFAULT_ARM, RLSimulator, mu_filename
 from env.robot import ROUTE_MODES
+from td import TDAgent, rl_sim_class
 
 # 학습 계수
 VERBOSE_EVERY         = 50
@@ -61,11 +63,11 @@ MU_EPISODE_OFFSET = 90_000    # μ(λ) 추정 에피소드 번호 (학습 에피
 
 def _mu_point(job) -> tuple:
     """작업자 프로세스: λ 격자 점 하나의 에피소드별 결정당 평균 국소 비용과 항별 평균 (계수 곱 전)"""
-    agent, layouts, l, i, n_seeds, sim_time, arm = job
+    agent, layouts, l, i, n_seeds, sim_time, arm, sim_kw = job
     costs, terms = [], []
     for M, L in sorted(layouts.items()):
-        sim = RLSimulator(L, agent, lam=l, seed=MU_SEED, sim_time=sim_time, num_robots=M,
-                          robot_capacity=L.robot_capacity, eval_mode=True, arm=arm)
+        sim = rl_sim_class(arm, train=False)(L, agent, lam=l, seed=MU_SEED, sim_time=sim_time, num_robots=M,
+                                             robot_capacity=L.robot_capacity, eval_mode=True, arm=arm, **sim_kw)
         for j in range(n_seeds):
             sim.reset(train_episode_seed(MU_SEED, MU_EPISODE_OFFSET + i * n_seeds + j))
             sim.run()
@@ -77,7 +79,7 @@ def _mu_point(job) -> tuple:
 def estimate_local_mu(layouts: Dict[int, object], agent: DQNAgent, lam: float, sim_time: float, arm: Arm,
                       n_points: int = LOCAL_MU_POINTS, n_seeds: int = LOCAL_MU_SEEDS,
                       workers: int = LOCAL_MU_WORKERS, verbose: bool = True,
-                      margin: float = CURRICULUM_LAM_MARGIN) -> dict:
+                      margin: float = CURRICULUM_LAM_MARGIN, sim_kw: Optional[Dict] = None) -> dict:
     """보상 중심화 기준표 μ(λ) / ρ(λ) (학습 전 호출, 기준 종류는 arm 보상의 Reward.center)
 
     학습 전 에이전트(f의 마지막 층 = 0이라 argmax = BL6 prior, 가중치 초기화와 무관)를 ε = 0으로
@@ -91,7 +93,7 @@ def estimate_local_mu(layouts: Dict[int, object], agent: DQNAgent, lam: float, s
     """
     assert agent.mu_table is None and agent.steps == 0, "학습 전에 호출해야 합니다"
     lams = [float(l) for l in np.linspace(lam * margin, lam, n_points)] if n_points > 1 else [lam]
-    jobs = [(agent, layouts, l, i, n_seeds, sim_time, arm) for i, l in enumerate(lams)]
+    jobs = [(agent, layouts, l, i, n_seeds, sim_time, arm, sim_kw or {}) for i, l in enumerate(lams)]
     if workers > 1:
         with ProcessPoolExecutor(min(workers, len(jobs))) as ex:
             res = list(ex.map(_mu_point, jobs))
@@ -112,7 +114,8 @@ def estimate_local_mu(layouts: Dict[int, object], agent: DQNAgent, lam: float, s
 
 
 def load_or_estimate_local_mu(cell_dir: str, layouts: Dict[int, object], agent: DQNAgent, lam: float,
-                              sim_time: float, arm: Arm, margin: float = CURRICULUM_LAM_MARGIN) -> tuple:
+                              sim_time: float, arm: Arm, margin: float = CURRICULUM_LAM_MARGIN,
+                              sim_kw: Optional[Dict] = None) -> tuple:
     """셀 폴더의 μ(λ) 표(env.rl.mu_filename)를 읽거나 (조건이 같을 때) 새로 추정해 저장, agent.mu_table 형식으로 반환"""
     path = os.path.join(cell_dir, mu_filename(arm))
     want = {"n_seeds": LOCAL_MU_SEEDS, "n_points": LOCAL_MU_POINTS, "sim_time": sim_time,
@@ -128,7 +131,7 @@ def load_or_estimate_local_mu(cell_dir: str, layouts: Dict[int, object], agent: 
         print(f"local 보상 기준점 μ(λ): {path} 조건 불일치, 다시 추정", flush=True)
     print(f"local 보상 기준점 μ(λ) 추정 (BL6 prior 정책, ε = 0, 격자 {LOCAL_MU_POINTS}점 × {LOCAL_MU_SEEDS} 에피소드)",
           flush=True)
-    tab = estimate_local_mu(layouts, agent, lam, sim_time, arm, margin=margin)
+    tab = estimate_local_mu(layouts, agent, lam, sim_time, arm, margin=margin, sim_kw=sim_kw)
     os.makedirs(cell_dir, exist_ok=True)
     tmp = path + f".tmp{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -190,9 +193,14 @@ def train(layouts: Union[Dict[int, object], object], agent: DQNAgent, store: Met
     assert agent.max_candidates >= max(Ms), (agent.max_candidates, Ms)
 
     lam_lo, lam_hi = lam * curriculum_margin, lam
-    sims = {M: RLSimulator(L, agent, lam=lam, seed=seed, sim_time=sim_time, num_robots=M,
-                           robot_capacity=L.robot_capacity, arm=arm, **(sim_kw or {}))
+    ring = arm.buffer == "ring"
+    online = arm.update == "online"
+    sims = {M: rl_sim_class(arm)(L, agent, lam=lam, seed=seed, sim_time=sim_time, num_robots=M,
+                                 robot_capacity=L.robot_capacity, arm=arm, **(sim_kw or {}))
             for M, L in layouts.items()}
+    if ring:
+        for s in sims.values():
+            s.update_every = update_ratio
     rng   = random.Random(seed)
     best  = None
     start = 1
@@ -230,11 +238,15 @@ def train(layouts: Union[Dict[int, object], object], agent: DQNAgent, store: Met
 
         for trans in transitions:
             agent.push(*trans)
+        if arm.truncate and not ring:
+            agent.flush_nstep()
         loss = None
-        n_updates = max(1, int(len(transitions) / update_ratio))
+        n_updates = max(1, int((sim.n_transitions if ring else len(transitions)) / update_ratio))
         q_sum = td_sum = 0.0
         n_done = 0
-        for _ in range(n_updates):
+        if online:             # 에피소드 도중 이미 업데이트함 (TDSimulator)
+            n_updates, n_done, loss, q_sum, td_sum = sim.n_updates, sim.n_trained, sim.last_loss, sim.q_sum, sim.td_sum
+        for _ in range(0 if online else n_updates):
             step_loss = agent.train_step()
             if step_loss is not None:
                 loss = step_loss
@@ -331,6 +343,7 @@ def add_common_args(p: argparse.ArgumentParser):
     p.add_argument("--grid", type=int, nargs=3, default=None, metavar=("BLOCKS", "AISLES", "SHELVES"),
                    help="그리드 크기 (블록 수, 블록당 통로 수, 선반 행 수). 기본 3 14 20")
     p.add_argument("--scenario", default=None, help="시나리오 JSON 문자열 또는 JSON 파일 경로 (env.orders.Scenario 필드)")
+    p.add_argument("--battery", default=None, help="배터리 제약 JSON 문자열 또는 JSON 파일 경로 (env.battery.BatteryConfig 필드)")
 
 
 def parse_args(p: argparse.ArgumentParser, argv=None) -> argparse.Namespace:
@@ -343,8 +356,9 @@ def parse_args(p: argparse.ArgumentParser, argv=None) -> argparse.Namespace:
         with open(config, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
         name = cfg.pop("name", os.path.splitext(os.path.basename(config))[0])
-        if isinstance(cfg.get("scenario"), dict):
-            cfg["scenario"] = json.dumps(cfg["scenario"], sort_keys=True)
+        for key in ("scenario", "battery"):
+            if isinstance(cfg.get(key), dict):
+                cfg[key] = json.dumps(cfg[key], sort_keys=True)
         dests = {a.dest for a in p._actions}
         bad = set(cfg) - dests - _OTHER_TOOL_KEYS
         if bad:
@@ -386,7 +400,7 @@ def check_same_config(args: argparse.Namespace, directory: str):
 
 def make_condition(args: argparse.Namespace) -> Condition:
     return Condition(traffic=args.traffic, motion=args.motion, route=args.route,
-                     grid=tuple(args.grid) if args.grid else None)
+                     grid=tuple(args.grid) if args.grid else None, battery=BatteryConfig.from_arg(args.battery))
 
 
 def runtime_env() -> dict:
@@ -445,15 +459,20 @@ def main(argv=None):
     tag_s    = f"_{args.tag}" if args.tag else ""
     arm      = ARMS[args.arm]
     layouts  = {M: cond.layout(M, args.ws, scenario) for M in train_Ms}
-    agent = DQNAgent(robot_capacity=ROBOT_CAPACITY, dist_norm=layouts[train_Ms[0]].dist_norm, seed=args.seed,
-                     sim_time=args.sim_time, num_robots=max(train_Ms), num_workstations=args.ws,
-                     n_step=arm.n_step, features=arm.features, lr=args.lr, batch_size=args.batch_size,
-                     buffer_size=args.buffer_size, target_update=args.target_update, epsilon=args.epsilon)
+    if arm.buffer == "ring" and len(train_Ms) > 1:
+        raise SystemExit("ring buffer는 단일 M 학습만 지원합니다")
+    agent_kw = dict(robot_capacity=ROBOT_CAPACITY, dist_norm=layouts[train_Ms[0]].dist_norm, seed=args.seed,
+                    sim_time=args.sim_time, num_robots=max(train_Ms), num_workstations=args.ws,
+                    n_step=arm.n_step, features=arm.features, lr=args.lr, batch_size=args.batch_size,
+                    buffer_size=args.buffer_size, target_update=args.target_update, epsilon=args.epsilon)
+    agent = TDAgent(beta=arm.beta_value, **agent_kw) if arm.buffer == "ring" else DQNAgent(**agent_kw)
     print(f"arm={args.arm} ({arm}), λ={args.lam:.0f}/hr, 학습 M={train_Ms}, K={args.ws}, {setting}, 특징 {agent.feat_dim}차원")
     cell_dir = os.path.join(args.out, setting, f"lam{args.lam:.0f}_M{spec}_K{args.ws}")
+    mu_kw = {"battery": cond.battery} if cond.battery is not None else {}     # BL6 prior 롤아웃도 같은 배터리 조건
     if args.mu_only:
         if arm.uses_mu:
-            load_or_estimate_local_mu(cell_dir, layouts, agent, lam, args.sim_time, arm, margin=args.curriculum_margin)
+            load_or_estimate_local_mu(cell_dir, layouts, agent, lam, args.sim_time, arm, margin=args.curriculum_margin,
+                                      sim_kw=mu_kw)
         return
 
     train_dir = os.path.join(cell_dir, f"{args.arm}_s{args.seed}{tag_s}")
@@ -465,7 +484,7 @@ def main(argv=None):
         os.remove(resume_path)
     if arm.uses_mu and not os.path.isfile(resume_path):
         agent.mu_table = load_or_estimate_local_mu(cell_dir, layouts, agent, lam, args.sim_time, arm,
-                                                   margin=args.curriculum_margin)
+                                                   margin=args.curriculum_margin, sim_kw=mu_kw)
     run_info = {"arm": args.arm, **arm.to_dict(), "train_seed": args.seed, "train_robots": train_Ms,
                 "train_lam_hr": args.lam, "num_workstations": args.ws, "traffic": cond.traffic, "motion": cond.motion,
                 "scenario": scenario.to_dict(), "condition": cond.to_dict(), "setting": setting,

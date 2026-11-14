@@ -53,7 +53,9 @@ import numpy as np
 from env.layout import NUM_ROBOTS, ROBOT_CAPACITY, ROBOT_SPEED
 from env.orders import SIM_TIME, Tote
 from env.robot import Robot
-from env.simulator import EpisodeResult, SimulatorBase, TOTE_ORDERS, delta_order, order_completion, planned_completions
+from env.reserve import ReserveMixin, reserve_cost_terms
+from env.simulator import (COST_DIST, EpisodeResult, SimulatorBase, TOTE_ORDERS, delta_order, order_completion,
+                           planned_completions)
 
 if TYPE_CHECKING:
     from agents import DQNAgent
@@ -71,7 +73,7 @@ REWARD_ALPHA_MID      = 2.0    # mid-trip 삽입 detour 감쇠 계수
 REWARD_ALPHA_IDLE     = 1.0    # idle 로봇 배정 detour 감쇠 계수
 REWARD_BETA_DEPLETION = 0.2    # 마지막 빈 idle 로봇 소진 페널티
 
-FEATURE_SETS = ("base", "order")     # Arm.features (agents.order_feature_dims)
+FEATURE_SETS = ("base", "order", "battery", "reserve", "reserve_battery")     # Arm.features (agents.order_feature_dims)
 
 
 def compute_legacy_reward(robot, layout, delta_d: float, robots: list, n_wait: int, num_robots: int,
@@ -112,11 +114,16 @@ class Arm:
     discount:   "time" (e^{−βτ}) / "decision" (결정당 γ)
     local_w:    local 비용 항 계수 (w_ext 탑재 토트 지연 추정, w_q 큐잉 토트 지연), 자기 토트 지연 계수는 1
     n_step:     n-step 전이 길이
-    features:   "base" (현행 후보 특징) / "order" (+ 주문 계획 특징, agents.order_feature_dims)
+    features:   "base" (현행 후보 특징) / "order" (+ 주문 계획 특징) / "battery" (+ SoC 특징), agents.order_feature_dims
     tote_order: 주문 내 토트 배정 순서 (env.simulator.TOTE_ORDERS)
     curriculum: True이면 앞쪽 절반 에피소드 λ ∈ [0.7λ, λ] 커리큘럼
     c_phi:      little_pbrs의 shaping 계수
     beta:       연속시간 할인율 (None = SMDP_BETA). 0이면 할인 없음 (진단)
+    buffer:     "per" (agents.DQNAgent의 PER + n-step) / "ring" (td.RingReplay, uniform, interval·local 보상)
+    update:     "episode" (에피소드 후 전이 수 / update_ratio회) / "online" (에피소드 도중, ring 전용)
+    reserve:    True이면 후보 로봇이 없을 때 운행 중 로봇의 다음 트립 예약을 행동으로 (env.reserve, features="reserve*")
+    truncate:   True이면 에피소드 끝을 terminal이 아니라 절단으로 (마지막 결정은 다음 상태가 없어 버림, per buffer)
+    w_dist:     결정이 늘린 이동거리 Δd (m)에 곱하는 비용 계수 (s/m), local·interval 보상에 더함
     """
     reward:     str = "local"
     discount:   str = "time"
@@ -127,12 +134,22 @@ class Arm:
     curriculum: bool = True
     c_phi:      float = 1.0
     beta:       Optional[float] = None
+    buffer:     str = "per"
+    update:     str = "episode"
+    reserve:    bool = False
+    truncate:   bool = False
+    w_dist:     float = 0.0
 
     def __post_init__(self):
         assert self.reward in REWARDS, self.reward
+        assert self.buffer in ("per", "ring"), self.buffer
+        assert self.update in ("episode", "online"), self.update
+        assert self.update == "episode" or self.buffer == "ring", "online 업데이트는 ring buffer 전용"
+        assert self.buffer == "per" or self.reward in ("interval", "local"), "ring buffer는 interval과 local 보상 전용"
         assert self.discount in ("time", "decision"), self.discount
         assert self.features in FEATURE_SETS, self.features
         assert self.tote_order in TOTE_ORDERS, self.tote_order
+        assert self.reserve == self.features.startswith("reserve"), "reserve 행동과 features='reserve*'는 함께 씀"
         object.__setattr__(self, "local_w", tuple(float(x) for x in self.local_w))
 
     @property
@@ -191,23 +208,43 @@ class LocalReward(Reward):
         super().reset()
         self._decisions: List[tuple] = []     # (토트, 결정 시각, 탑재 토트 지연 추정)
         self._queued:    List[tuple] = []     # (직전 결정 번호, 토트, 큐 진입 시각)
+        self._q_of:      Dict[int, List[tuple]] = {}   # 결정 번호 → [(큐잉 토트, 큐 진입 시각)]
 
     def on_decision(self, robot, tote, delta, eligible):
         sim = self.sim
-        ext = 0.0 if robot.is_idle else len(sim._robot_totes[robot.id]) * delta / ROBOT_SPEED
-        self._decisions.append((tote, sim.now, ext))
+        if getattr(sim, "_decision_kind", "insert") == "reserve":      # 예약: 이미 예약된 토트들이 늦어짐
+            ext = len(sim._resv[robot.id]) * delta / ROBOT_SPEED
+        else:
+            ext = 0.0 if robot.is_idle else len(sim._robot_totes[robot.id]) * delta / ROBOT_SPEED
+        self._decisions.append((tote, sim.now, ext, delta))
         return None
 
     def on_queue(self, tote):
         if self._decisions:
             self._queued.append((len(self._decisions) - 1, tote, self.sim.now))
+            self._q_of.setdefault(len(self._decisions) - 1, []).append((tote, self.sim.now))
+
+    # ring buffer (td.TDSimulator)용 점진 확정: 결정 k의 토트와 k 뒤 큐잉 토트가 모두 끝나면 finalize()와 같은 값
+    def ready(self, k: int) -> bool:
+        """결정 k의 보상이 확정됐는지 (다음 결정이 이미 있어야 k의 큐잉 토트 목록이 닫힘)"""
+        return (k < len(self._decisions) - 1 and self._decisions[k][0].done_time is not None
+                and all(t.done_time is not None for t, _ in self._q_of.get(k, ())))
+
+    def value(self, k: int) -> float:
+        """확정된 결정 k의 보상 −(c_k − μ) / Z (μ는 finalize()와 같은 agent.local_mu, 없으면 0)"""
+        w_ext, w_q = self.arm.local_w
+        tote, t_k, ext, dd = self._decisions[k]
+        c = tote.done_time - t_k + w_ext * ext + self.arm.w_dist * dd
+        c += w_q * sum(t.done_time - t_q for t, t_q in self._q_of.get(k, ()))
+        mu = self.sim.agent.local_mu(self.sim.lam)
+        return -(c - (mu or 0.0)) / REWARD_SCALE
 
     def finalize(self):
         T = self.sim.sim_time
         w_ext, w_q = self.arm.local_w
         done_t = lambda t: t.done_time if t.done_time is not None else T
-        own  = [done_t(t) - t_k for t, t_k, _ in self._decisions]
-        cost = [o + w_ext * ext for o, (_, _, ext) in zip(own, self._decisions)]
+        own  = [done_t(t) - t_k for t, t_k, _, _ in self._decisions]
+        cost = [o + w_ext * ext + self.arm.w_dist * dd for o, (_, _, ext, dd) in zip(own, self._decisions)]
         q_sum = 0.0
         for k, t, t_q in self._queued:
             q = done_t(t) - t_q
@@ -216,7 +253,7 @@ class LocalReward(Reward):
         if not cost:
             return []
         n = len(cost)
-        self.last_cost_terms = (sum(own) / n, sum(ext for _, _, ext in self._decisions) / n, q_sum / n)
+        self.last_cost_terms = (sum(own) / n, sum(ext for _, _, ext, _ in self._decisions) / n, q_sum / n)
         mu = self.sim.agent.local_mu(self.sim.lam)
         if mu is None:
             mu = sum(cost) / n
@@ -371,14 +408,67 @@ class LegacyReward(Reward):
                                      len(eligible), sim.robot_capacity)
 
 
-REWARDS = {"local": LocalReward, "legacy": LegacyReward,
-           "order_increment": OrderIncrementReward, "little_pbrs": LittlePBRSReward}
+class IntervalReward(Reward):
+    """구간 적분 비용: r_k = −(1/Z) ∫_{t_k}^{t_{k+1}} e^{−β(t−t_k)} (N(t) − ρ) dt (td 모듈 설명), 다음 결정 시점에 확정
+
+    β = 0, ρ = 0이면 Σ r_k · (−Z)가 도착 주문의 censored 흐름시간 합 (Little)
+    ρ = BL6 prior 롤아웃의 시간 평균 N(t) (없으면 0). 미래 합이 어느 궤적이든 같은 상수만큼 이동하므로 정책 선택에 영향 없음
+    """
+    center = "rho"
+
+    def reset(self):
+        super().reset()
+        self._times: List[float] = []
+        self._area:  List[float] = []      # 결정 k의 할인 적분 ∫ e^{−β(t−t_k)} (N − ρ) dt
+        self._n_area = 0.0                 # ∫ N dt (center_stat)
+        self._dist:  List[float] = []      # 결정이 늘린 이동거리 Δd (arm.w_dist 항)
+        rho = self.sim.agent.local_mu(self.sim.lam)
+        self._rho = 0.0 if rho is None else rho
+
+    def on_decision(self, robot, tote, delta, eligible):
+        self._times.append(self.sim.now)
+        self._area.append(0.0)
+        self._dist.append(delta)
+        return None
+
+    def on_interval(self, t0, t1, n_in_system, n_busy):
+        self._n_area += n_in_system * (t1 - t0)
+        if not self._times:
+            return
+        t_k, b = self._times[-1], self.arm.beta_value
+        weight = (math.exp(-b * (t0 - t_k)) - math.exp(-b * (t1 - t_k))) / b if b > 0 else t1 - t0
+        self._area[-1] += (n_in_system - self._rho) * weight
+
+    def closed_value(self) -> float:
+        """직전 결정의 보상 (이번 결정의 on_decision 직후 호출, 구간이 끝났으므로 확정값)"""
+        return -(self._area[-2] + self.arm.w_dist * self._dist[-2]) / REWARD_SCALE
+
+    def finalize(self):
+        if not self._times:
+            return []
+        n = len(self._area)
+        self.last_cost_terms = (sum(self._area) / n, 0.0, 0.0)
+        self.last_mu, self.last_mean_cost = self._rho, sum(self._area) / n
+        return [-(a + self.arm.w_dist * d) / REWARD_SCALE for a, d in zip(self._area, self._dist)]
+
+    def center_stat(self) -> float:
+        """시간 평균 N(t) = ∫_0^T N dt / T"""
+        return self._n_area / self.sim.sim_time
+
+
+REWARDS = {"local": LocalReward, "legacy": LegacyReward, "order_increment": OrderIncrementReward,
+           "little_pbrs": LittlePBRSReward, "interval": IntervalReward}
 
 # arm 이름 → 설정. 기본(현행) arm은 DEFAULT_ARM
 DEFAULT_ARM = "local_r8_ddqn_v2"
 _NEW = dict(features="order", tote_order="bottleneck_first")      # 안 A·B 공통 (단계 2·3)
 ARMS: Dict[str, Arm] = {
     DEFAULT_ARM:              Arm(),
+    # TD ablation (한 요소씩 교체, A0 = DEFAULT_ARM): 보상 → replay buffer → 업데이트 시점
+    "td_a1_reward":           Arm(reward="interval"),
+    "td_a2_buffer":           Arm(reward="interval", buffer="ring"),
+    "td_a3_online":           Arm(reward="interval", buffer="ring", update="online"),
+    "local_battery":          Arm(features="battery"),                  # 현행 보상 + SoC 특징 (--battery 필요)
     "local_r8_ddqn_v2_gamma": Arm(discount="decision"),                 # 할인만 결정당 γ
     "legacy_r8_ddqn_v2":      Arm(reward="legacy", discount="decision"),  # 원 논문 보상 + 결정당 γ
     # 단계 1: 현행 보상에서 2항(탑재 토트 지연 추정)만 제거 (= local_w (0, 1))
@@ -392,6 +482,17 @@ ARMS: Dict[str, Arm] = {
     "little_pbrs_cphi0.5":    Arm(reward="little_pbrs", n_step=3, c_phi=0.5, **_NEW),
     "little_pbrs_n10":        Arm(reward="little_pbrs", n_step=10, c_phi=1.0, **_NEW),
 }
+# 예약 행동 (env.reserve) 실험: prior = BL6R (c_d = COST_DIST). h3 = 할인 horizon 3시간 (β = 1/10800) + 절단,
+#   wd1 = 이동거리 비용 1 s/m, td = interval 보상 + ring buffer + online 업데이트. _bat = SoC 특징 (--battery 필요)
+_H3 = 1.0 / 10800.0
+for _f, _sfx in (("reserve", ""), ("reserve_battery", "_bat")):
+    ARMS[f"rsv_local{_sfx}"]        = Arm(reserve=True, features=_f)
+    ARMS[f"rsv_local_h3{_sfx}"]     = Arm(reserve=True, features=_f, beta=_H3, truncate=True)
+    ARMS[f"rsv_local_h3_ro{_sfx}"]  = Arm(reserve=True, features=_f, beta=_H3, truncate=True, buffer="ring",
+                                          update="online")      # A0 + ring buffer + online 업데이트
+    ARMS[f"rsv_local_h3_wd1{_sfx}"] = Arm(reserve=True, features=_f, beta=_H3, truncate=True, w_dist=1.0)
+    ARMS[f"rsv_td_h3{_sfx}"]        = Arm(reward="interval", buffer="ring", update="online", reserve=True, features=_f,
+                                          beta=_H3)
 for _w in (0.0, 0.25, 0.5, 2.0, 4.0):     # local 비용 항 계수 민감도 (계수 하나만 바꿈)
     ARMS[f"{DEFAULT_ARM}_wext{_w:g}"] = Arm(local_w=(_w, 1.0))
     ARMS[f"{DEFAULT_ARM}_wq{_w:g}"]   = Arm(local_w=(1.0, _w))
@@ -406,11 +507,13 @@ def mu_filename(arm: Arm) -> str:
     local 기본 계수는 local_mu.json, 계수가 다르면 local_mu_wext{a}_wq{b}.json, order_increment는 rho_order_increment.json.
     tote_order가 bottleneck_first이면 BL6 prior 궤적이 달라지므로 _bf를 붙임
     """
-    bf = "_bf" if arm.tote_order == "bottleneck_first" else ""
+    bf = ("_rsv" if arm.reserve else "") + ("_bf" if arm.tote_order == "bottleneck_first" else "")
     if arm.reward == "order_increment":
         return f"rho_order_increment{bf}.json"
-    w = arm.local_w
-    return (f"local_mu{bf}.json" if w == (1.0, 1.0) else f"local_mu_wext{w[0]:g}_wq{w[1]:g}{bf}.json")
+    if arm.reward == "interval":
+        return f"rho_interval{bf}.json"
+    w, wd = arm.local_w, (f"_wd{arm.w_dist:g}" if arm.w_dist else "")
+    return (f"local_mu{wd}{bf}.json" if w == (1.0, 1.0) else f"local_mu_wext{w[0]:g}_wq{w[1]:g}{wd}{bf}.json")
 
 
 # 시뮬레이터
@@ -437,15 +540,21 @@ class RLSimulator(SimulatorBase):
             robot_capacity: 로봇 용량
             eval_mode: True이면 ε=0으로 실행하고 전이를 수집하지 않음
             arm: 보상 설정 (None이면 기본 arm)
-            sim_opts: SimulatorBase 추가 인자 (route)
+            sim_opts: SimulatorBase 추가 인자 (route, battery)
         """
         arm = arm or ARMS[DEFAULT_ARM]
         super().__init__(layout, lam, seed, sim_time, num_robots, robot_capacity,
                          **{"tote_order": arm.tote_order, **sim_opts})
+        if arm.features in ("battery", "reserve_battery") and self.battery is None:
+            raise ValueError(f"features='{arm.features}' arm에는 배터리 제약(--battery)이 필요합니다")
+        if arm.reserve and not isinstance(self, ReserveMixin):
+            raise ValueError("reserve arm은 RLReserveSimulator / td.TDReserveSimulator로 실행해야 합니다 (td.rl_sim_class)")
         self.agent     = agent
         self.eval_mode = eval_mode
         self.arm       = arm
         self.order_feats = arm.features == "order"
+        self.battery_feats = arm.features in ("battery", "reserve_battery")
+        self.reserve_feats = arm.features.startswith("reserve")
         self.reward    = REWARDS[self.arm.reward](self, self.arm)
         self._init_rl_state()
 
@@ -488,8 +597,8 @@ class RLSimulator(SimulatorBase):
 
         super().run()
 
-        # 마지막 결정은 다음 상태가 없으므로 done=True로 마감
-        if not self.eval_mode and self._pending is not None:
+        # 마지막 결정은 다음 상태가 없으므로 done=True로 마감 (arm.truncate이면 절단: 버림)
+        if not self.eval_mode and self._pending is not None and not self.arm.truncate:
             key, r, g = self._pending_transition(self.sim_time)
             self._transitions.append((key, r, None, True, g))
         self._pending = None
@@ -497,7 +606,8 @@ class RLSimulator(SimulatorBase):
         if rewards is not None:
             self.total_reward = sum(rewards)
             if self._transitions:
-                assert len(self._transitions) == len(rewards), (len(self._transitions), len(rewards))
+                assert len(self._transitions) == len(rewards) - (1 if self.arm.truncate else 0), \
+                    (len(self._transitions), len(rewards))
                 self._transitions = [(k, r, nk, d, g) for (k, _, nk, d, g), r in zip(self._transitions, rewards)]
 
         if self.eval_mode:
@@ -552,6 +662,10 @@ class RLSimulator(SimulatorBase):
                min(self._n_in_system / (M * C), 5.0), sum(not r.is_idle for r in self.robots) / M]
         if self.order_feats:
             ctx += self._order_globals()
+        if self.reserve_feats:
+            ctx += [min(sum(len(v) for v in self._resv.values()) / (M * C), 1.0)]
+        if self.battery_feats:
+            ctx += self.battery.global_features()
         W = np.concatenate([ws.ravel(), np.eye(K, dtype=np.float32)[tote.ws_id],
                             np.asarray(ctx, dtype=np.float32)])
         return R, W
@@ -591,16 +705,35 @@ class RLSimulator(SimulatorBase):
         학습 모드이면 직전 결정의 전이를 완성해 _transitions에 추가, 이번 결정은 _pending에 보류
         """
         t0 = time.perf_counter()
-        eligible = self._eligible_robots()
+        eligible = self._eligible_robots(tote)
+        kind = "insert"
+        if not eligible and self.arm.reserve:          # 빈 슬롯 로봇이 없으면 다음 트립 예약 후보 (env.reserve)
+            eligible, kind = self._reserve_candidates(tote), "reserve"
         if not eligible:
+            if self.arm.reserve:
+                self.n_fifo += 1
             self.reward.on_queue(tote)
-            self.order_mgr.enqueue(tote, self.now)
+            self._enqueue_tote(tote)
             return
-        ctx    = self._context()
-        deltas = [self._insertion_delta(r, tote) for r in eligible]
-        extra  = self._order_features(tote, eligible) if self.order_feats else None
+        ctx = self._context()
+        terms = None
+        if kind == "insert":
+            deltas = [self._insertion_delta(r, tote) for r in eligible]
+        else:
+            raw    = [reserve_cost_terms(self, r, tote, COST_DIST) for r in eligible]
+            deltas = [x[3] for x in raw]
+            terms  = [(n / self.robot_capacity, delay, stay * ROBOT_SPEED, dd, cost) for n, delay, stay, dd, cost in raw]
+        extra = self._order_features(tote, eligible) if self.order_feats else None
+        if self.reserve_feats:
+            extra = self._reserve_features(eligible, kind)
+            if self.battery_feats:
+                bat = (self.battery.candidate_features(tote, eligible) if kind == "insert"
+                       else self.battery.reserve_features(tote, eligible))
+                extra = [a + b for a, b in zip(extra, bat)]
+        elif self.battery_feats:
+            extra = self.battery.candidate_features(tote, eligible)
         feats  = self.agent.build_candidates(tote.loc, eligible, deltas, self.layout, ctx, now=self.now,
-                                             order_feats=extra)
+                                             order_feats=extra, bl6_terms=terms)
         self.agent.set_global(*self._global_state(tote, eligible))
         idx = self.agent.select_index(feats)
         t_sel = time.perf_counter()
@@ -610,13 +743,26 @@ class RLSimulator(SimulatorBase):
 
         robot = eligible[idx]
         self._count_decision(robot, eligible)
+        self._decision_kind = kind
         reward = self.reward.on_decision(robot, tote, deltas[idx], eligible)   # 배정 직전 상태
         if reward is not None:
             self.total_reward += reward
-        self._extra_travel += deltas[idx]
-        self._assign_tote(robot, tote)
+        if kind == "insert":
+            self._extra_travel += deltas[idx]
+            self._assign_tote(robot, tote)
+        else:
+            self._reserve(robot, tote)
         self._record_latency(t0, t_sel, time.perf_counter() - t_rec)
+        self._after_decision(reward)
 
+    def _reserve_features(self, robots: List[Robot], kind: str) -> List[List[float]]:
+        """후보별 [예약 후보 여부, 지금 트립 해제까지 예상 시간 / STATE_MAX_TIME (상한 3), 예약된 토트 수 / C]"""
+        C, S = self.robot_capacity, STATE_MAX_TIME
+        return [[float(kind == "reserve"), min(self._robot_time_left(r) / S, 3.0), len(self._resv[r.id]) / C]
+                for r in robots]
+
+    def _after_decision(self, reward: Optional[float]):
+        """배정 직후: 직전 결정의 전이를 완성하고 이번 결정을 보류"""
         key = self.agent.last_key
         if not self.eval_mode and self._pending is not None:
             key_prev, r_prev, g_prev = self._pending_transition(self.now)
@@ -652,4 +798,15 @@ class RLSimulator(SimulatorBase):
         res.avg_candidates     = self._n_cands / self._n_dec if self._n_dec else 0.0
         res.n_qpen_active      = self._n_qpen
         res.n_depletion_active = self._n_depl
+        return res
+
+
+class RLReserveSimulator(ReserveMixin, RLSimulator):
+    """예약 행동이 있는 RL 시뮬레이터 (arm.reserve). 결정은 RLSimulator._on_tote_arrival (예약 후보도 에이전트가 고름)"""
+    _on_tote_arrival = RLSimulator._on_tote_arrival
+
+    def build_result(self, label: str, episode: int, lam: float) -> EpisodeResult:
+        """예약 결정도 결정 수(n_decisions)에 포함, 도착 즉시 배정되지 않은 토트(n_queued_totes)로도 집계"""
+        res = RLSimulator.build_result(self, label, episode, lam)
+        res.n_queued_totes += self.n_reserved
         return res
