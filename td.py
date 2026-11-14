@@ -1,6 +1,8 @@
 """관측 기반 TD 학습: ring replay buffer, TDAgent (BL6 잔차 네트워크는 agents.ScoreNet 그대로), TDSimulator
 
 전이는 결정 시점의 관측만으로 만듦 (env.rl의 "interval" 보상과 함께 씀)
+"local" 보상(A0)이면 τ_k는 다음 결정에서, r_k는 결정 k의 토트와 k 뒤 큐잉 토트가 끝날 때 채우고, 둘 다 채워진 칸만 샘플링
+  (값은 에피소드 후 LocalReward.finalize()와 같음. 에피소드 끝에 남은 칸은 finalize() 값으로 채움)
   s_k: 결정 k 직전 관측, a_k: 고른 후보, r_k: [t_k, t_k+1] 구간의 실제 비용, τ_k = t_k+1 − t_k
   r_k는 다음 결정 시점에 확정되므로 토트 완료시각이나 에피소드 종료를 기다리지 않음
 
@@ -48,6 +50,8 @@ class RingReplay:
         self.seg    = np.full(c, -1, np.int64)
         self.seq    = np.full(c, -1, np.int64)      # 쓰인 순번 (연속 여부 판정)
         self.closed = np.zeros(c, np.bool_)
+        self.has_r  = np.zeros(c, np.bool_)       # 지연 확정 보상 (local): 보상과 τ를 따로 채움
+        self.has_t  = np.zeros(c, np.bool_)
 
     def __len__(self):
         return min(self.count, self.capacity)
@@ -65,14 +69,26 @@ class RingReplay:
         i = self.head
         self.cand[i], self.mask[i], self.act[i], self.R[i], self.W[i] = pad, mask, a, R, W
         self.seg[i], self.seq[i], self.closed[i] = self.seg_id, self.count, False
+        self.has_r[i] = self.has_t[i] = False
         self.pending = i
         self.head = (i + 1) % self.capacity
         self.count += 1
+        return i
 
     def close(self, reward: float, tau: float):
         """가장 최근 open한 전이의 보상과 다음 결정까지 시간 확정"""
         i = self.pending
         self.r[i], self.tau[i], self.closed[i] = reward, tau, True
+
+    def set_tau(self, i: int, tau: float):
+        """지연 확정용: 칸 i의 다음 결정까지 시간 (보상이 이미 있으면 확정)"""
+        self.tau[i], self.has_t[i] = tau, True
+        self.closed[i] = self.has_r[i]
+
+    def set_reward(self, i: int, reward: float):
+        """지연 확정용: 칸 i의 보상 (τ가 이미 있으면 확정)"""
+        self.r[i], self.has_r[i] = reward, True
+        self.closed[i] = self.has_t[i]
 
     def _valid(self, idx: np.ndarray) -> np.ndarray:
         n = self.n_step
@@ -108,7 +124,7 @@ class RingReplay:
                 "next_cand": self.cand[nxt], "next_mask": self.mask[nxt], "next_R": self.R[nxt], "next_W": self.W[nxt]}
 
     def state(self) -> dict:
-        names = ("cand", "mask", "R", "W", "act", "r", "tau", "seg", "seq", "closed")
+        names = ("cand", "mask", "R", "W", "act", "r", "tau", "seg", "seq", "closed", "has_r", "has_t")
         return {"arrays": None if self.cand is None else {k: getattr(self, k) for k in names},
                 "head": self.head, "count": self.count, "seg_id": self.seg_id, "pending": self.pending,
                 "rng": self.rng.bit_generator.state}
@@ -116,6 +132,8 @@ class RingReplay:
     def load_state(self, s: dict):
         for k, v in (s["arrays"] or {}).items():
             setattr(self, k, v)
+        if self.cand is not None and not hasattr(self, "has_r"):       # 이전 체크포인트
+            self.has_r, self.has_t = self.closed.copy(), self.closed.copy()
         self.head, self.count, self.seg_id, self.pending = s["head"], s["count"], s["seg_id"], s["pending"]
         self.rng.bit_generator.state = s["rng"]
 
@@ -175,16 +193,43 @@ class TDSimulator(RLSimulator):
 
     def run(self):
         self.agent.replay.new_segment()
-        return super().run()
+        self._slots = []          # local 보상: [(결정 번호, ring 칸, 칸 순번)] 보상 미확정
+        self._k = -1
+        out = super().run()
+        if self._slots:           # 에피소드 끝: 미완료 토트는 T로 자른 finalize() 값 (PER 버전과 같음)
+            fin = self.reward.finalize()
+            for k, i, q in self._slots:
+                self._set_reward(i, q, fin[k])
+            self._slots = []
+        return out
+
+    def _set_reward(self, i: int, seq: int, r: float):
+        replay = self.agent.replay
+        if replay.seq[i] == seq:          # ring이 한 바퀴 돌아 덮어쓴 칸이면 버림
+            replay.set_reward(i, r)
 
     def _after_decision(self, reward):
         replay = self.agent.replay
         closed = self._open
+        delayed = self.arm.reward == "local"
         if closed:
-            replay.close(self.reward.closed_value(), self.now - self._t_prev)
+            if delayed:
+                replay.set_tau(replay.pending, self.now - self._t_prev)
+            else:
+                replay.close(self.reward.closed_value(), self.now - self._t_prev)
             self.n_transitions += 1
-        replay.open(self.agent.last_key)
+        i = replay.open(self.agent.last_key)
         self._open, self._t_prev = True, self.now
+        if delayed:
+            self._k += 1
+            self._slots.append((self._k, i, int(replay.seq[i])))
+            keep = []
+            for k, j, q in self._slots:
+                if self.reward.ready(k):
+                    self._set_reward(j, q, self.reward.value(k))
+                else:
+                    keep.append((k, j, q))
+            self._slots = keep
         if closed and self.arm.update == "online" and self.n_transitions % self.update_every == 0:
             self.n_updates += 1
             loss = self.agent.train_step()

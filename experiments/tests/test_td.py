@@ -136,6 +136,35 @@ class TestRing(unittest.TestCase):
         self.assertEqual(rp.rng.bit_generator.state, other.rng.bit_generator.state)
 
 
+class TestLocalRing(unittest.TestCase):
+    """A0 (local 보상) + ring buffer: 지연 확정한 보상 = 에피소드 후 finalize() 값"""
+
+    def _run(self, arm, battery):
+        from env.battery import BatteryConfig
+        from td import rl_sim_class
+        M, lam = 6, 240 / 3600
+        L = Condition().layout(M, 3)
+        agent = _agent(L, M, arm, cls=TDAgent)
+        agent.mu_table = ([lam], [150.0])
+        sim = rl_sim_class(arm)(L, agent, lam=lam, seed=10000, sim_time=3600, num_robots=M,
+                                robot_capacity=L.robot_capacity, arm=arm, battery=BatteryConfig() if battery else None)
+        sim.update_every = 10 ** 9            # 업데이트 없이 수집만 (같은 정책으로 비교)
+        sim.reset(10000)
+        sim.run()
+        return sim, agent
+
+    def test_rewards_match_finalize(self):
+        for name, bat in (("rsv_local_h3_ro", False), ("rsv_local_h3_ro_bat", True)):
+            sim, agent = self._run(ARMS[name], bat)
+            fin = sim.reward.finalize()
+            rp, n = agent.replay, len(fin)
+            self.assertGreater(n, 100)
+            self.assertTrue(np.allclose(rp.r[:n], fin, atol=1e-12), name)
+            self.assertTrue(rp.has_r[:n].all(), name)
+            self.assertTrue(rp.closed[:n - 1].all() and not rp.closed[n - 1], name)   # 마지막 결정은 τ 없음 (절단)
+            self.assertEqual(sim.n_transitions, n - 1)
+
+
 class TestLearning(unittest.TestCase):
 
     def test_toy_mdp(self):

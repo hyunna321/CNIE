@@ -119,7 +119,7 @@ class Arm:
     curriculum: True이면 앞쪽 절반 에피소드 λ ∈ [0.7λ, λ] 커리큘럼
     c_phi:      little_pbrs의 shaping 계수
     beta:       연속시간 할인율 (None = SMDP_BETA). 0이면 할인 없음 (진단)
-    buffer:     "per" (agents.DQNAgent의 PER + n-step) / "ring" (td.RingReplay, uniform, interval 보상 전용)
+    buffer:     "per" (agents.DQNAgent의 PER + n-step) / "ring" (td.RingReplay, uniform, interval·local 보상)
     update:     "episode" (에피소드 후 전이 수 / update_ratio회) / "online" (에피소드 도중, ring 전용)
     reserve:    True이면 후보 로봇이 없을 때 운행 중 로봇의 다음 트립 예약을 행동으로 (env.reserve, features="reserve*")
     truncate:   True이면 에피소드 끝을 terminal이 아니라 절단으로 (마지막 결정은 다음 상태가 없어 버림, per buffer)
@@ -145,7 +145,7 @@ class Arm:
         assert self.buffer in ("per", "ring"), self.buffer
         assert self.update in ("episode", "online"), self.update
         assert self.update == "episode" or self.buffer == "ring", "online 업데이트는 ring buffer 전용"
-        assert self.buffer == "per" or self.reward == "interval", "ring buffer는 interval 보상 전용"
+        assert self.buffer == "per" or self.reward in ("interval", "local"), "ring buffer는 interval과 local 보상 전용"
         assert self.discount in ("time", "decision"), self.discount
         assert self.features in FEATURE_SETS, self.features
         assert self.tote_order in TOTE_ORDERS, self.tote_order
@@ -208,6 +208,7 @@ class LocalReward(Reward):
         super().reset()
         self._decisions: List[tuple] = []     # (토트, 결정 시각, 탑재 토트 지연 추정)
         self._queued:    List[tuple] = []     # (직전 결정 번호, 토트, 큐 진입 시각)
+        self._q_of:      Dict[int, List[tuple]] = {}   # 결정 번호 → [(큐잉 토트, 큐 진입 시각)]
 
     def on_decision(self, robot, tote, delta, eligible):
         sim = self.sim
@@ -221,6 +222,22 @@ class LocalReward(Reward):
     def on_queue(self, tote):
         if self._decisions:
             self._queued.append((len(self._decisions) - 1, tote, self.sim.now))
+            self._q_of.setdefault(len(self._decisions) - 1, []).append((tote, self.sim.now))
+
+    # ring buffer (td.TDSimulator)용 점진 확정: 결정 k의 토트와 k 뒤 큐잉 토트가 모두 끝나면 finalize()와 같은 값
+    def ready(self, k: int) -> bool:
+        """결정 k의 보상이 확정됐는지 (다음 결정이 이미 있어야 k의 큐잉 토트 목록이 닫힘)"""
+        return (k < len(self._decisions) - 1 and self._decisions[k][0].done_time is not None
+                and all(t.done_time is not None for t, _ in self._q_of.get(k, ())))
+
+    def value(self, k: int) -> float:
+        """확정된 결정 k의 보상 −(c_k − μ) / Z (μ는 finalize()와 같은 agent.local_mu, 없으면 0)"""
+        w_ext, w_q = self.arm.local_w
+        tote, t_k, ext, dd = self._decisions[k]
+        c = tote.done_time - t_k + w_ext * ext + self.arm.w_dist * dd
+        c += w_q * sum(t.done_time - t_q for t, t_q in self._q_of.get(k, ()))
+        mu = self.sim.agent.local_mu(self.sim.lam)
+        return -(c - (mu or 0.0)) / REWARD_SCALE
 
     def finalize(self):
         T = self.sim.sim_time
@@ -471,6 +488,8 @@ _H3 = 1.0 / 10800.0
 for _f, _sfx in (("reserve", ""), ("reserve_battery", "_bat")):
     ARMS[f"rsv_local{_sfx}"]        = Arm(reserve=True, features=_f)
     ARMS[f"rsv_local_h3{_sfx}"]     = Arm(reserve=True, features=_f, beta=_H3, truncate=True)
+    ARMS[f"rsv_local_h3_ro{_sfx}"]  = Arm(reserve=True, features=_f, beta=_H3, truncate=True, buffer="ring",
+                                          update="online")      # A0 + ring buffer + online 업데이트
     ARMS[f"rsv_local_h3_wd1{_sfx}"] = Arm(reserve=True, features=_f, beta=_H3, truncate=True, w_dist=1.0)
     ARMS[f"rsv_td_h3{_sfx}"]        = Arm(reward="interval", buffer="ring", update="online", reserve=True, features=_f,
                                           beta=_H3)
