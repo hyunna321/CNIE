@@ -15,6 +15,17 @@
       Q_k = 결정 k 직후(다음 결정 전) 후보가 없어 큐에 들어간 토트. r_k = −(c_k − μ(λ)) / Z
       μ(λ) = 학습 전 BL6 prior 롤아웃의 결정당 평균 c_k (train.load_or_estimate_local_mu), 없으면 에피소드 평균
       local_w = (0, 1)이면 2항 없는 버전 (단계 1, arm local_noterm2)
+  - "order_ext" (R2): 주문 증분 비용 + 주문 단위 외부비용 이전 (ring buffer에서 지연 확정, OrderExtReward)
+      주문 o의 토트를 처리 순서(결정·큐 진입 순)로 놓고 F_j = max_{i≤j}(T_i^done) − a_o (F_0 = 0)
+      inc_j = F_j − F_{j−1}  (Σ_j inc_j = 흐름시간, 병목이 아닌 토트는 0)
+      c_k = inc(k의 토트) + w_q · Σ_{q∈Q_k} inc_q + η · (T_k^done − t_k) + w_ext · (E_k − X_k)
+        E_k = Σ_{o ≠ 자기 주문} [Ť_o(배정 후) − Ť_o(배정 전)]   (주문 계획 완료시각 = 토트 계획 완료의 max, 예약 토트 포함)
+        X_k = 다른 결정들이 k의 주문에 대해 낸 E 중 k로 이전된 몫 (피해 주문에서 새 Ť가 가장 늦은 토트의 결정)
+        Σ_k (E_k − X_k) = 0 (이전받을 결정이 없는 경우 제외) → Σ_k c_k = Σ_o F_o + η Σ 자기 지연
+      r_k = −(c_k − μ(λ)) / Z, μ(λ) = BL6 prior 롤아웃의 결정당 평균 c_k (local과 같은 절차)
+        ρ·τ_k 중심화는 같은 주문의 연속 결정(τ = 0, 결정의 60%) 때문에 보상 분산이 2배 (M14 λ320 측정).
+        결정 시각·수는 도착으로 정해지므로 (FIFO 없음) 결정당 상수 중심화도 정책 선택에 영향 없음
+      η (Arm.eta): 토트 단위 자기 지연을 조금 섞는 다이얼 (0 = 순수 주문 단위)
   - "order_increment" (안 A): 주문 누적 증분 비용
       주문 o의 토트를 처리 순서(배정 시각, 큐잉 토트는 큐 진입 시각, 같으면 결정 순서)로 놓고
       inc_j = max(a_o, max_{i≤j} T_i^done) − max(a_o, max_{i<j} T_i^done)  (Σ_j inc_j = o의 censored 흐름시간)
@@ -53,9 +64,9 @@ import numpy as np
 from env.layout import NUM_ROBOTS, ROBOT_CAPACITY, ROBOT_SPEED
 from env.orders import SIM_TIME, Tote
 from env.robot import Robot
-from env.reserve import ReserveMixin, reserve_cost_terms
+from env.reserve import ReserveMixin, reserve_cost_terms, reserved_completions, reserved_eta
 from env.simulator import (COST_DIST, EpisodeResult, SimulatorBase, TOTE_ORDERS, delta_order, order_completion,
-                           planned_completions)
+                           planned_completions, robot_timeline)
 
 if TYPE_CHECKING:
     from agents import DQNAgent
@@ -123,7 +134,8 @@ class Arm:
     update:     "episode" (에피소드 후 전이 수 / update_ratio회) / "online" (에피소드 도중, ring 전용)
     reserve:    True이면 후보 로봇이 없을 때 운행 중 로봇의 다음 트립 예약을 행동으로 (env.reserve, features="reserve*")
     truncate:   True이면 에피소드 끝을 terminal이 아니라 절단으로 (마지막 결정은 다음 상태가 없어 버림, per buffer)
-    w_dist:     결정이 늘린 이동거리 Δd (m)에 곱하는 비용 계수 (s/m), local·interval 보상에 더함
+    w_dist:     결정이 늘린 이동거리 Δd (m)에 곱하는 비용 계수 (s/m), local·interval·order_ext 보상에 더함
+    eta:        order_ext 보상의 토트 단위 자기 지연 계수 η (R2, 병목이 아닌 토트에도 체류 비용 신호)
     """
     reward:     str = "local"
     discount:   str = "time"
@@ -139,13 +151,17 @@ class Arm:
     reserve:    bool = False
     truncate:   bool = False
     w_dist:     float = 0.0
+    eta:        float = 0.0
 
     def __post_init__(self):
         assert self.reward in REWARDS, self.reward
         assert self.buffer in ("per", "ring"), self.buffer
         assert self.update in ("episode", "online"), self.update
         assert self.update == "episode" or self.buffer == "ring", "online 업데이트는 ring buffer 전용"
-        assert self.buffer == "per" or self.reward in ("interval", "local"), "ring buffer는 interval과 local 보상 전용"
+        assert self.buffer == "per" or self.reward in ("interval", "local", "order_ext"), \
+            "ring buffer는 interval, local, order_ext 보상 전용"
+        assert self.reward != "order_ext" or self.buffer == "ring", "order_ext 보상은 ring buffer 전용"
+        assert self.eta == 0.0 or self.reward == "order_ext", "eta는 order_ext 보상 옵션"
         assert self.discount in ("time", "decision"), self.discount
         assert self.features in FEATURE_SETS, self.features
         assert self.tote_order in TOTE_ORDERS, self.tote_order
@@ -201,8 +217,12 @@ class Reward:
 
 
 class LocalReward(Reward):
-    """local 보상 (모듈 설명). 결정 i의 보상 = finalize() 결과의 i번째. 항 = (자기 지연, 탑재 지연 추정, 큐잉 지연)"""
+    """local 보상 (모듈 설명). 결정 i의 보상 = finalize() 결과의 i번째. 항 = (자기 지연, 탑재 지연 추정, 큐잉 지연)
+
+    ring buffer(td.TDSimulator)에서는 ready(k) / value(k)로 에피소드 도중 확정 (delayed)
+    """
     center = "mu"
+    delayed = True
 
     def reset(self):
         super().reset()
@@ -261,6 +281,135 @@ class LocalReward(Reward):
         return [-(c - mu) / REWARD_SCALE for c in cost]
 
     def center_stat(self) -> float:
+        return self.last_mean_cost
+
+
+class OrderExtReward(Reward):
+    """R2 주문 증분 + 외부비용 이전 (모듈 설명 "order_ext"). 항 = (증분 합, 순 외부비용 E − X, η 항 전 자기 지연)
+
+    결정 k는 k에 귀속된 토트(자기 토트 + k 뒤 큐잉 토트)의 주문이 모두 끝나고 다음 결정이 있으면 확정 (ready)
+    이전받는 결정은 피해 주문의 토트 결정이라 그 주문이 끝나기 전에는 확정되지 않음 → 확정값 = finalize() 값
+    """
+    center = "mu"
+    delayed = True
+
+    def reset(self):
+        super().reset()
+        self._times: List[float] = []          # t_k
+        self._attr:  List[List] = []           # 결정 k에 귀속된 토트 [자기 토트, 큐잉 토트 ...]
+        self._ext:   List[float] = []          # E_k (s)
+        self._dd:    List[float] = []          # Δd_k (m, w_dist)
+        self._recv:  List[float] = []          # X_k
+        self._dec_of: Dict[int, int] = {}      # 토트 id → 결정 번호
+        self._seq:   Dict[int, int] = {}       # 토트 id → 처리 순번 (주문 안 정렬 기준)
+        self._inc:   Dict[int, float] = {}     # 완료 주문 토트의 inc 캐시 (토트 id → inc)
+        self.unattributed = 0                  # 첫 결정 전에 큐로 간 토트 수
+
+    def _order_incs(self, order, T: Optional[float] = None) -> Dict[int, float]:
+        """주문의 토트별 inc (T가 있으면 미완료 토트 완료시각을 T로 자름). 처리 순번이 없는 토트는 맨 뒤"""
+        a, run, out = order.arrival_time, 0.0, {}
+        big = len(self._seq) + 1
+        for t in sorted(order.totes, key=lambda x: self._seq.get(x.tote_id, big)):
+            d = t.done_time if t.done_time is not None else T
+            F = max(run, d - a)
+            out[t.tote_id] = F - run
+            run = F
+        return out
+
+    def _inc_of(self, tote, T: Optional[float] = None) -> float:
+        if tote.tote_id not in self._inc:
+            if tote.order.completion_time is None:
+                return self._order_incs(tote.order, T)[tote.tote_id]
+            self._inc.update(self._order_incs(tote.order))
+        return self._inc[tote.tote_id]
+
+    def _externality(self, robot, tote, delta) -> List[tuple]:
+        """이 배정이 다른 주문의 계획 완료를 늦추는 양 [(주문, 증가 s, 피해 토트 [(토트, 새 Ť)])]"""
+        sim, t = self.sim, self.sim.now
+        pc = sim.planned_pc()
+        if getattr(sim, "_decision_kind", "insert") == "reserve":
+            res = sim._resv[robot.id]
+            if not res:
+                return []
+            eta = reserved_eta(sim, robot, res + [tote])
+            shifted = {x: eta for x in res}
+        else:
+            if robot.is_idle or not sim._robot_totes[robot.id]:
+                return []
+            new = robot_timeline(sim, robot, extra=tote)
+            shifted = {x: new[x] for x in sim._robot_totes[robot.id] if x in new}
+        after = {**pc, **shifted}
+        out = []
+        for o in {x.order for x in shifted} - {tote.order}:
+            d = order_completion(o, after, t) - order_completion(o, pc, t)
+            if abs(d) > 1e-9:
+                out.append((o, d, [(x, s) for x, s in shifted.items() if x.order is o]))
+        return out
+
+    def on_decision(self, robot, tote, delta, eligible):
+        k = len(self._times)
+        w_ext = self.arm.local_w[0]
+        E = 0.0
+        if w_ext and not self.sim.eval_mode:     # 평가에서는 보상을 쓰지 않음 (이전은 합이 0이라 center_stat도 거의 같음)
+            for o, d, hit in self._externality(robot, tote, delta):
+                E += d
+                # 이전받을 결정: 피해 토트 중 새 Ť가 가장 늦은 토트의 결정 (없으면 그 주문의 다른 미완료 토트 결정)
+                js = [self._dec_of[x.tote_id] for x, _ in sorted(hit, key=lambda p: -p[1]) if x.tote_id in self._dec_of]
+                js = js or [self._dec_of[x.tote_id] for x in o.totes if x.tote_id in self._dec_of and x.done_time is None]
+                if js:
+                    self._recv[js[0]] += d
+        self._dec_of[tote.tote_id] = k
+        self._seq[tote.tote_id] = len(self._seq)
+        self._times.append(self.sim.now)
+        self._attr.append([tote])
+        self._ext.append(E)
+        self._dd.append(delta)
+        self._recv.append(0.0)
+        return None
+
+    def on_queue(self, tote):
+        self._seq[tote.tote_id] = len(self._seq)
+        if self._times:
+            self._attr[-1].append(tote)
+        else:
+            self.unattributed += 1
+
+    def on_interval(self, t0, t1, n_in_system, n_busy):
+        pass
+
+    def _cost(self, k: int, T: Optional[float] = None) -> Tuple[float, float, float, float]:
+        """결정 k의 (c_k, 증분 합, 순 외부비용, 자기 지연)"""
+        w_ext, w_q = self.arm.local_w
+        own_t = self._attr[k][0]
+        inc = sum(self._inc_of(x, T) * (1.0 if i == 0 else w_q) for i, x in enumerate(self._attr[k]))
+        done = own_t.done_time if own_t.done_time is not None else T
+        own = done - self._times[k]
+        net = self._ext[k] - self._recv[k]
+        return inc + self.arm.eta * own + w_ext * net + self.arm.w_dist * self._dd[k], inc, net, own
+
+    def ready(self, k: int) -> bool:
+        return k < len(self._times) - 1 and all(x.order.completion_time is not None for x in self._attr[k])
+
+    def value(self, k: int) -> float:
+        mu = self.sim.agent.local_mu(self.sim.lam)
+        return -(self._cost(k)[0] - (mu or 0.0)) / REWARD_SCALE
+
+    def finalize(self):
+        if not self._times:
+            return []
+        T = self.sim.sim_time
+        parts = [self._cost(k, T) for k in range(len(self._times))]
+        c = [p[0] for p in parts]
+        n = len(c)
+        mu = self.sim.agent.local_mu(self.sim.lam)
+        if mu is None:
+            mu = sum(c) / n
+        self.last_cost_terms = tuple(sum(p[i] for p in parts) / n for i in (1, 2, 3))
+        self.last_mu, self.last_mean_cost = mu, sum(c) / n
+        return [-(ck - mu) / REWARD_SCALE for ck in c]
+
+    def center_stat(self) -> float:
+        """결정당 평균 비용 (s)"""
         return self.last_mean_cost
 
 
@@ -457,7 +606,7 @@ class IntervalReward(Reward):
 
 
 REWARDS = {"local": LocalReward, "legacy": LegacyReward, "order_increment": OrderIncrementReward,
-           "little_pbrs": LittlePBRSReward, "interval": IntervalReward}
+           "little_pbrs": LittlePBRSReward, "interval": IntervalReward, "order_ext": OrderExtReward}
 
 # arm 이름 → 설정. 기본(현행) arm은 DEFAULT_ARM
 DEFAULT_ARM = "local_r8_ddqn_v2"
@@ -493,6 +642,9 @@ for _f, _sfx in (("reserve", ""), ("reserve_battery", "_bat")):
     ARMS[f"rsv_local_h3_wd1{_sfx}"] = Arm(reserve=True, features=_f, beta=_H3, truncate=True, w_dist=1.0)
     ARMS[f"rsv_td_h3{_sfx}"]        = Arm(reward="interval", buffer="ring", update="online", reserve=True, features=_f,
                                           beta=_H3)
+    # R2 보상 (기반 = rsv_local_h3_ro: A0 + ring + online과 보상 설정만 다름): 주문 증분 + 외부비용 이전 + η 0.2
+    ARMS[f"rsv_r2_ord_eta0.2{_sfx}"] = Arm(reward="order_ext", eta=0.2, reserve=True, features=_f, beta=_H3,
+                                           truncate=True, buffer="ring", update="online")
 for _w in (0.0, 0.25, 0.5, 2.0, 4.0):     # local 비용 항 계수 민감도 (계수 하나만 바꿈)
     ARMS[f"{DEFAULT_ARM}_wext{_w:g}"] = Arm(local_w=(_w, 1.0))
     ARMS[f"{DEFAULT_ARM}_wq{_w:g}"]   = Arm(local_w=(1.0, _w))
@@ -513,6 +665,10 @@ def mu_filename(arm: Arm) -> str:
     if arm.reward == "interval":
         return f"rho_interval{bf}.json"
     w, wd = arm.local_w, (f"_wd{arm.w_dist:g}" if arm.w_dist else "")
+    if arm.reward == "order_ext":
+        eta = f"_eta{arm.eta:g}" if arm.eta else ""
+        ww = "" if w == (1.0, 1.0) else f"_wext{w[0]:g}_wq{w[1]:g}"
+        return f"mu_order_ext{eta}{ww}{wd}{bf}.json"
     return (f"local_mu{wd}{bf}.json" if w == (1.0, 1.0) else f"local_mu_wext{w[0]:g}_wq{w[1]:g}{wd}{bf}.json")
 
 
@@ -555,6 +711,7 @@ class RLSimulator(SimulatorBase):
         self.order_feats = arm.features == "order"
         self.battery_feats = arm.features in ("battery", "reserve_battery")
         self.reserve_feats = arm.features.startswith("reserve")
+        self._pc_now: Optional[Dict] = None
         self.reward    = REWARDS[self.arm.reward](self, self.arm)
         self._init_rl_state()
 
@@ -697,6 +854,16 @@ class RLSimulator(SimulatorBase):
                         float(tk > sib + 1e-9), min(n_late / C, 2.0), min(max(d / S, -3.0), 5.0)])
         return out
 
+    def planned_pc(self) -> Dict:
+        """지금 상태의 계획 완료시각 {토트: Ť} (로봇에 실린 토트 + 예약 토트, order_ext 외부비용).
+        한 결정 안에서는 _pc_now로 재사용"""
+        if self._pc_now is None:
+            pc = planned_completions(self, "estimate")
+            if isinstance(self, ReserveMixin):
+                pc.update(reserved_completions(self))
+            self._pc_now = pc
+        return self._pc_now
+
     # 결정
 
     def _on_tote_arrival(self, tote: Tote):
@@ -705,6 +872,7 @@ class RLSimulator(SimulatorBase):
         학습 모드이면 직전 결정의 전이를 완성해 _transitions에 추가, 이번 결정은 _pending에 보류
         """
         t0 = time.perf_counter()
+        self._pc_now = None                          # planned_pc 캐시는 결정 하나 (배정 직전 상태) 동안만 유효
         eligible = self._eligible_robots(tote)
         kind = "insert"
         if not eligible and self.arm.reserve:          # 빈 슬롯 로봇이 없으면 다음 트립 예약 후보 (env.reserve)

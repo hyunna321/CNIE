@@ -3,6 +3,7 @@
 전이는 결정 시점의 관측만으로 만듦 (env.rl의 "interval" 보상과 함께 씀)
 "local" 보상(A0)이면 τ_k는 다음 결정에서, r_k는 결정 k의 토트와 k 뒤 큐잉 토트가 끝날 때 채우고, 둘 다 채워진 칸만 샘플링
   (값은 에피소드 후 LocalReward.finalize()와 같음. 에피소드 끝에 남은 칸은 finalize() 값으로 채움)
+  "order_ext" 보상(R2)도 같은 방식 (Reward.delayed, 확정 조건은 귀속 토트의 주문이 모두 끝났을 때)
   s_k: 결정 k 직전 관측, a_k: 고른 후보, r_k: [t_k, t_k+1] 구간의 실제 비용, τ_k = t_k+1 − t_k
   r_k는 다음 결정 시점에 확정되므로 토트 완료시각이나 에피소드 종료를 기다리지 않음
 
@@ -211,7 +212,7 @@ class TDSimulator(RLSimulator):
     def _after_decision(self, reward):
         replay = self.agent.replay
         closed = self._open
-        delayed = self.arm.reward == "local"
+        delayed = getattr(self.reward, "delayed", False)      # local, order_ext: ready(k) / value(k)로 지연 확정
         if closed:
             if delayed:
                 replay.set_tau(replay.pending, self.now - self._t_prev)

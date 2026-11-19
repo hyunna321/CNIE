@@ -30,6 +30,29 @@ def reserve_cost_terms(sim, robot, tote, cost_dist: float) -> Tuple[int, float, 
     return n, delay, stay, dd, delay + stay + cost_dist * dd
 
 
+def reserved_eta(sim, robot, totes) -> float:
+    """robot의 다음 트립에 totes를 예약했을 때 그 토트들의 계획 완료시각 (s, 대략값, 토트 모두 같은 값)
+
+      Ť = now + T_free + 다음 트립 거리 / v + Σ 피킹 + Σ WS 처리   (WS 대기·혼잡 무시, BL6R 예약 비용의 stay에 처리 시간을 더한 값)
+    배터리 제약에서는 트립 끝에 예약 토트가 공용 큐 앞으로 돌아가 다른 로봇이 실을 수 있으나 같은 값으로 봄
+    """
+    if not totes:
+        return sim.now
+    return (sim.now + sim._robot_time_left(robot) + sim._next_trip_distance(robot, totes) / ROBOT_SPEED
+            + sum(t.pick_s + t.proc_s for t in totes))
+
+
+def reserved_completions(sim) -> dict:
+    """예약된 모든 토트의 계획 완료시각 {토트: Ť} (env.simulator.planned_completions에 더해 씀)"""
+    out = {}
+    for r in sim.robots:
+        res = sim._resv[r.id]
+        if res:
+            eta = reserved_eta(sim, r, res)
+            out.update({t: eta for t in res})
+    return out
+
+
 class ReserveMixin:
     """SimulatorBase 하위 클래스 앞에 섞어 쓰는 예약 구조 (모듈 설명)"""
 
