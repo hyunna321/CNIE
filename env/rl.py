@@ -645,6 +645,11 @@ for _f, _sfx in (("reserve", ""), ("reserve_battery", "_bat")):
     # R2 보상 (기반 = rsv_local_h3_ro: A0 + ring + online과 보상 설정만 다름): 주문 증분 + 외부비용 이전 + η 0.2
     ARMS[f"rsv_r2_ord_eta0.2{_sfx}"] = Arm(reward="order_ext", eta=0.2, reserve=True, features=_f, beta=_H3,
                                            truncate=True, buffer="ring", update="online")
+    # R4 (가중치): A0 local 보상 식 그대로, 탑재 토트 지연 계수 w_ext만 1 → 2, 3 (새 항 없음).
+    #   운행 중 트립에 얹는 결정의 단가 ↑ (새 출발은 탑재 토트가 없어 2항 0) → Totes/trip ↓, 트립 내 지연 ↓ 가설
+    for _w in (2.0, 3.0):
+        ARMS[f"rsv_r4_wext{_w:g}{_sfx}"] = Arm(local_w=(_w, 1.0), reserve=True, features=_f, beta=_H3,
+                                               truncate=True, buffer="ring", update="online")
 for _w in (0.0, 0.25, 0.5, 2.0, 4.0):     # local 비용 항 계수 민감도 (계수 하나만 바꿈)
     ARMS[f"{DEFAULT_ARM}_wext{_w:g}"] = Arm(local_w=(_w, 1.0))
     ARMS[f"{DEFAULT_ARM}_wq{_w:g}"]   = Arm(local_w=(1.0, _w))

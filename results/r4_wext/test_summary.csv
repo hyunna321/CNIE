@@ -1,0 +1,5 @@
+policy,w_ext,buffer,update,n_train_seeds,avg_flow_time,flow_p99,dist_per_order,avg_wait_time,avg_totes_per_trip,n_charge_required,d_flow_vs_BL6Rc1,se,se_train_seed,seed_flows,selected_episode
+BL6R_MarginalCost_reserve_cd1,,-,-,1,218.783,405.701,103.272,5.602,3.491,0.1,0.0,0.0,,,
+rsv_local_h3_ro_bat,1.0,ring,online,3,227.847,440.32,102.974,6.894,3.797,0.1,9.06,0.45,,"[225.3, 228.9, 229.3]",
+rsv_r4_wext2_bat,2.0,ring,online,3,227.415,451.458,103.732,6.854,3.749,0.05,8.63,0.52,0.86,"[228.6, 227.9, 225.7]","[150, 900, 300]"
+rsv_r4_wext3_bat,3.0,ring,online,3,226.49,527.643,105.091,10.338,3.52,0.867,7.71,2.54,2.35,"[229.8, 227.7, 221.9]","[100, 250, 450]"
