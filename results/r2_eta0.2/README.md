@@ -19,3 +19,5 @@ M14 K3 λ320, 배터리 on, 로봇별 큐(예약), 1000 에피소드, 학습 시
 파일
 - `test_summary.csv`: 정책별 평균. `se` = 테스트 시나리오 20개 대응 차이의 표준오차, `se_train_seed` = 학습 시드 단위 표준오차, `seed_flows` = 학습 시드별 네트워크 평균 흐름
 - `eval_s1.csv`: 학습 시드 1 네트워크의 테스트 시나리오별 결과와 같은 시나리오의 BL6R 흐름 (`bl6r_flow`)
+- `weights/agent_s{1,2,3}.pt`: 학습 시드별 검증 최고 체크포인트 (위 테스트 결과를 낸 가중치, 각 557 KB). `.gitignore`의 `*.pt` 예외로 강제 추가.
+  재평가: `python -m experiments.run_compare --config experiments/configs/rsv_battery.yaml --load results/r2_eta0.2/weights/agent_s1.pt --baselines`
