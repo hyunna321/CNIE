@@ -2,7 +2,7 @@
 
 M14 K3 λ320, 배터리 on, 로봇별 큐(예약), 학습 시드 1~5, 테스트 시드 10000~10019 (20개).
 ablation(`results/r2_ablation`)에서 큐 항을 제외하고, 계수 민감도(`results/r2_sens`)에서 η 0.2, w_ext 1을 선택.
-학습: `bash experiments/scripts/run_r2_ablation.sh` (9965WX). 최고 네트워크는 학습 시드 4 → `weights/agent_s4_best.pt`.
+학습: `bash experiments/scripts/run_r2_ablation.sh`. 최고 네트워크는 학습 시드 4 → `weights/agent_s4_best.pt`.
 
 ## 보상
 
@@ -99,7 +99,7 @@ best는 검증 점수로 선택 (테스트 결과로 고르지 않음). 테스�
 
 - ΔFlow는 같은 테스트 시나리오 대응 차이 평균 ± 표준오차
 - BL6R(c_d = 1)과 Flow 차이 없음 (+0.2 ± 0.7 s), p99는 RL이 6 s 낮음, Dist·Wait는 BL6R이 조금 낮음. 나머지 베이스라인은 20/20 시나리오 모두 RL이 빠름
-- 로컬(Core Ultra 9 285K)과 서버(9965WX) 평가 결과 동일 (218.94 s)
+- 서로 다른 장비 2대에서 평가 결과 동일 (218.94 s)
 
 파일
 - `weights/agent_s{1,2,3,5}.pt`, `weights/agent_s4_best.pt`: 학습 시드별 검증 최고 체크포인트

@@ -67,7 +67,7 @@
  "sim_time": 36000,
  "tag": null,
  "env": {
-  "cpu": "AMD Ryzen Threadripper PRO 9965WX 24-Cores",
+  "cpu": "",
   "logical_cpus": 48,
   "torch_threads": 1,
   "omp_num_threads": "1",
@@ -106,7 +106,7 @@
  "train_episode_wall_s_mean": 47.43046114616096,
  "train_sim_s_total": 47420.06440191809,
  "train_n_updates": 905649,
- "checkpoint": "/home/user/github/MTSR_r2abl/runs/rsv/grid_free_reserve_bat-R12000-c5.33333-res50-l0.2-t1-i1/lam320_M14_K3/rsv_r2_ord_eta0.2_noq_bat_s4/agent.pt",
+ "checkpoint": "runs/rsv/grid_free_reserve_bat-R12000-c5.33333-res50-l0.2-t1-i1/lam320_M14_K3/rsv_r2_ord_eta0.2_noq_bat_s4/agent.pt",
  "select": "val",
  "selected_episode": 100
 }

@@ -2,7 +2,7 @@
 
 기준: `rsv_r2_ord_eta0.2_noq_bat` (w_ext 1, w_q 0, η 0.2, 학습 시드 1~5는 `results/r2_ablation`). 계수 하나만 바꿈.
 M14 K3 λ320, 배터리 on, 로봇별 큐(예약), 1000 에피소드, 학습 시드 1~5, 테스트 시드 10000~10019 (20개).
-실행: `bash experiments/scripts/run_r2_sens.sh` (9965WX, 35개 동시, 약 17.5시간 + μ 약 5시간).
+실행: `bash experiments/scripts/run_r2_sens.sh` (35개 동시, 약 17.5시간 + μ 약 5시간).
 
 결정 비용 c_k = inc + η · 자기 지연 + w_ext · (E − X)  (w_q = 0)
 
@@ -54,4 +54,4 @@ M14 K3 λ320, 배터리 on, 로봇별 큐(예약), 1000 에피소드, 학습 시
 파일
 - `test_summary.csv`: 설정별 평균, 시드 std, 기준·BL6R 대비 차이, 검증 진동, 검증 기준 최고 시드
 - `per_seed.csv`: 학습 시드별 네트워크 테스트 평균, 검증 최고값과 선택 에피소드
-- 원본: 서버 `~/github/MTSR_r2abl/runs/rsv`, 로컬 사본 `runs/r2_ablation`
+- 원본: `runs/r2_ablation`

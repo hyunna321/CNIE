@@ -1,7 +1,7 @@
 # R2 보상 항 ablation (rsv_r2_ord*_bat)
 
 M14 K3 λ320, 배터리 on, 로봇별 큐(예약), 1000 에피소드, 학습 시드 1~5, 테스트 시드 10000~10019 (20개).
-학습 설정은 Full(`rsv_r2_ord_eta0.2_bat`)과 같고 보상 계수만 다름 (`env/rl.py` ARMS). 실행: `bash experiments/scripts/run_r2_ablation.sh` (9965WX, 27개 동시, 학습 1회 약 14시간).
+학습 설정은 Full(`rsv_r2_ord_eta0.2_bat`)과 같고 보상 계수만 다름 (`env/rl.py` ARMS). 실행: `bash experiments/scripts/run_r2_ablation.sh` (27개 동시, 학습 1회 약 14시간).
 
 결정 비용 c_k = inc(자기 토트) + w_q · 큐 토트 inc + η · 자기 지연 + w_ext · (E − X). inc(자기 토트)는 모든 arm에 유지.
 
@@ -29,10 +29,10 @@ M14 K3 λ320, 배터리 on, 로봇별 큐(예약), 1000 에피소드, 학습 시
 
 ## 참고
 
-- Full 학습 시드 1~3은 `results/r2_eta0.2/weights` 가중치를 9965WX에서 다시 평가한 값 (218.6 / 223.0 / 232.6). 원래 기록(218.5 / 223.2 / 233.4)과 0.1~0.8 s 차이 (평가 장비 차이)
+- Full 학습 시드 1~3은 `results/r2_eta0.2/weights` 가중치를 다시 평가한 값 (218.6 / 223.0 / 232.6). 원래 기록(218.5 / 223.2 / 233.4)과 0.1~0.8 s 차이 (평가 장비 차이)
 - BL6R은 같은 테스트 시드의 로컬 평가 (`runs/r2s1_compare`, `results/r2_eta0.2`와 같은 값)
 
 파일
 - `test_summary.csv`: 설정별 평균, 학습 시드별 Flow, Full·BL6R 대비 차이
 - `per_seed.csv`: 학습 시드별 네트워크의 테스트 평균과 검증 선택 에피소드
-- 원본: 서버 `~/github/MTSR_r2abl/runs/rsv`, 로컬 사본 `runs/r2_ablation` (eval.csv, run.json, 로그)
+- 원본: `runs/r2_ablation` (eval.csv, run.json, 로그)

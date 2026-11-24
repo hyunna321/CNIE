@@ -8,7 +8,7 @@
 #     rsv_r2_ord_noext_bat         −ext −η     (w_ext 0, w_q 1, η 0)
 #     rsv_r2_ord_inconly_bat       inc only    (w_ext 0, w_q 0, η 0)
 #   설정 고정: M14 K3 λ320, 배터리 on, 로봇별 큐(예약), β = 1/10800, 1000 에피소드
-#   학습 27개 동시 (9965WX 24코어 기준 약 14~16시간). 다시 실행하면 resume으로 이어서 학습, 끝난 테스트는 건너뜀
+#   학습 27개 동시 (24코어 기준 약 14~16시간). 다시 실행하면 resume으로 이어서 학습, 끝난 테스트는 건너뜀
 #   PY=.venv/bin/python bash experiments/scripts/run_r2_ablation.sh   (저장소 최상위에서 실행)
 #   결과 정리: results/r2_ablation
 set -uo pipefail

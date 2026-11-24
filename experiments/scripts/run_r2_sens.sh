@@ -4,7 +4,7 @@
 #     η     ∈ {0, 0.1, 0.5, 1}  (w_ext 1)   rsv_r2_noq_eta{η}_bat
 #     w_ext ∈ {0, 0.5, 2}       (η 0.2)     rsv_r2_noq_wext{w}_bat
 #   설정 고정: M14 K3 λ320, 배터리 on, 로봇별 큐(예약), β = 1/10800, 1000 에피소드
-#   학습 35개 동시 (9965WX 24코어/48스레드). 다시 실행하면 resume으로 이어서 학습, 끝난 테스트는 건너뜀
+#   학습 35개 동시 (24코어/48스레드). 다시 실행하면 resume으로 이어서 학습, 끝난 테스트는 건너뜀
 #   PY=.venv/bin/python bash experiments/scripts/run_r2_sens.sh   (저장소 최상위에서 실행)
 #   결과 정리: results/r2_sens
 set -uo pipefail
