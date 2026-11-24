@@ -10,3 +10,5 @@ BL과 RL agents 비교 및 RL 성능 입증
 /runs를 통해 나온 결과를 /results 폴더안 파일로 결과를 생성하여 공유 및 github repo 업로드
 
 Flow, Dist, Wait, Totes/trip 으로 검증
+
+branch merge 후 branch 삭제

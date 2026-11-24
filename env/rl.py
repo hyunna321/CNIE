@@ -56,7 +56,7 @@ from __future__ import annotations
 import bisect
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -645,6 +645,21 @@ for _f, _sfx in (("reserve", ""), ("reserve_battery", "_bat")):
     # R2 보상 (기반 = rsv_local_h3_ro: A0 + ring + online과 보상 설정만 다름): 주문 증분 + 외부비용 이전 + η 0.2
     ARMS[f"rsv_r2_ord_eta0.2{_sfx}"] = Arm(reward="order_ext", eta=0.2, reserve=True, features=_f, beta=_H3,
                                            truncate=True, buffer="ring", update="online")
+    # R2 보상 항 ablation (Full = rsv_r2_ord_eta0.2: inc + w_q·큐 inc + η·자기 지연 + w_ext·(E − X)), 한 번에 보상 계수만 바꿈
+    #   local_w = (w_ext, w_q). inc(자기 토트)는 목표(Σ 주문 흐름시간) 자체라 모든 arm에 유지
+    for _name, _w, _eta in (("rsv_r2_ord",               (1.0, 1.0), 0.0),     # −η
+                            ("rsv_r2_ord_eta0.2_noext",  (0.0, 1.0), 0.2),     # −ext
+                            ("rsv_r2_ord_eta0.2_noq",    (1.0, 0.0), 0.2),     # −queue
+                            ("rsv_r2_ord_noext",         (0.0, 1.0), 0.0),     # −ext −η
+                            ("rsv_r2_ord_inconly",       (0.0, 0.0), 0.0)):    # inc only
+        ARMS[f"{_name}{_sfx}"] = replace(ARMS[f"rsv_r2_ord_eta0.2{_sfx}"], local_w=_w, eta=_eta)
+    # R2 −queue(기준 w_ext 1, w_q 0, η 0.2) 계수 민감도: 한 번에 계수 하나만 바꿈
+    #   η ∈ {0, 0.1, 0.5, 1}: 목표 자체가 Σ 흐름 + η Σ 토트 체류로 바뀜 (BL6R prior에서 η·체류 / 결정 비용 ≈ 0, 19, 54, 70 %)
+    #   w_ext ∈ {0, 0.5, 2}: Σ(E − X) = 0이라 에피소드 목표는 같고 결정별 책임 배분(보상 분산)만 바뀜
+    for _eta in (0.0, 0.1, 0.5, 1.0):
+        ARMS[f"rsv_r2_noq_eta{_eta:g}{_sfx}"] = replace(ARMS[f"rsv_r2_ord_eta0.2_noq{_sfx}"], eta=_eta)
+    for _w in (0.0, 0.5, 2.0):
+        ARMS[f"rsv_r2_noq_wext{_w:g}{_sfx}"] = replace(ARMS[f"rsv_r2_ord_eta0.2_noq{_sfx}"], local_w=(_w, 0.0))
     # R4 (가중치): A0 local 보상 식 그대로, 탑재 토트 지연 계수 w_ext만 1 → 2, 3 (새 항 없음).
     #   운행 중 트립에 얹는 결정의 단가 ↑ (새 출발은 탑재 토트가 없어 2항 0) → Totes/trip ↓, 트립 내 지연 ↓ 가설
     for _w in (2.0, 3.0):

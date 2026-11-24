@@ -1,0 +1,112 @@
+{
+ "arm": "rsv_r2_ord_eta0.2_noq_bat",
+ "reward": "order_ext",
+ "discount": "time",
+ "local_w": [
+  1.0,
+  0.0
+ ],
+ "n_step": 3,
+ "features": "reserve_battery",
+ "tote_order": "arrival",
+ "curriculum": true,
+ "c_phi": 1.0,
+ "beta": 9.259259259259259e-05,
+ "buffer": "ring",
+ "update": "online",
+ "reserve": true,
+ "truncate": true,
+ "w_dist": 0.0,
+ "eta": 0.2,
+ "train_seed": 3,
+ "train_robots": [
+  14
+ ],
+ "train_lam_hr": 320,
+ "num_workstations": 3,
+ "traffic": "free",
+ "motion": "reserve",
+ "scenario": {
+  "arrival": "poisson",
+  "peak_mult": 2.0,
+  "peak_start": 0.3,
+  "peak_len": 0.2,
+  "sine_amp": 0.5,
+  "sine_period": 3600.0,
+  "batch_mean": 5.0,
+  "batch_fixed": false,
+  "scv": 1.0,
+  "lines_mean": 2.5,
+  "lines_max": 10,
+  "sku_dist": "uniform",
+  "abc_items": 0.2,
+  "abc_demand": 0.8,
+  "zipf_alpha": 1.0,
+  "storage": "random",
+  "pick_time": 5.2,
+  "pick_dist": "fixed",
+  "pick_cv": 0.5,
+  "ws_proc_time": 4.9,
+  "ws_proc_dist": "fixed",
+  "ws_proc_cv": 0.5
+ },
+ "condition": {
+  "traffic": "free",
+  "motion": "reserve",
+  "route": "nnh",
+  "battery": {
+   "range_m": 12000,
+   "charge_rate": 5.333333333333333,
+   "reserve_m": 50,
+   "low_soc": 0.2,
+   "target_soc": 1.0,
+   "initial_soc": 1.0
+  }
+ },
+ "setting": "grid_free_reserve_bat-R12000-c5.33333-res50-l0.2-t1-i1",
+ "sim_time": 36000,
+ "tag": null,
+ "env": {
+  "cpu": "",
+  "logical_cpus": 48,
+  "torch_threads": 1,
+  "omp_num_threads": "1",
+  "python": "3.10.12",
+  "torch": "2.7.1+cpu",
+  "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35"
+ },
+ "hyper": {
+  "lr": 0.0003,
+  "batch_size": 128,
+  "buffer_size": 50000,
+  "target_update": 200,
+  "epsilon": 0.05,
+  "update_ratio": 8,
+  "curriculum_margin": 0.7
+ },
+ "resumed": false,
+ "local_mu_table": {
+  "lam_hr": [
+   224.0,
+   248.0,
+   272.0,
+   296.0,
+   320.0
+  ],
+  "mu_s": [
+   99.7161137479878,
+   103.57080355670715,
+   109.43184101542383,
+   117.65497797208786,
+   128.44085804747263
+  ]
+ },
+ "alpha_final": 0.10994981229305267,
+ "train_wall_s": 48467.37378040422,
+ "train_episode_wall_s_mean": 45.29840191847272,
+ "train_sim_s_total": 45288.287243241444,
+ "train_n_updates": 903326,
+ "checkpoint": "runs/rsv/grid_free_reserve_bat-R12000-c5.33333-res50-l0.2-t1-i1/lam320_M14_K3/rsv_r2_ord_eta0.2_noq_bat_s3/agent.pt",
+ "select": "val",
+ "selected_episode": 800
+}
