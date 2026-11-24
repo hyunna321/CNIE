@@ -1,0 +1,27 @@
+out: runs/rsv
+tag: null
+lam: 320
+robots: 14
+ws: 3
+sim_time: 36000
+traffic: free
+motion: reserve
+route: nnh
+grid: null
+scenario: null
+battery: '{"charge_rate": 5.333333333333333, "initial_soc": 1.0, "low_soc": 0.2, "range_m":
+  12000, "reserve_m": 50, "target_soc": 1.0}'
+arm: rsv_r2_ord_eta0.2_noq_bat
+train_robots: null
+seed: 2
+episodes: 1000
+select: val
+val_every: 50
+n_val: 5
+lr: 0.0003
+batch_size: 128
+buffer_size: 50000
+target_update: 200
+epsilon: 0.05
+update_ratio: 8
+curriculum_margin: 0.7
